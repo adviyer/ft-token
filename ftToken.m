@@ -91,7 +91,7 @@ var
     MainMem:  HomeState;
     Procs: array [Proc] of ProcState;
     FaultNet: array [Node] of multiset [NetMax] of Message;  -- Performance and persistent messages, can be deleted
-    TrNet: array [Node] of multiset [NetMax] of Message; -- Token recreation messages, cosmic ray proof, never deleted
+    TrNet: array [Node] of Message; -- Token recreation messages, cosmic ray proof, never deleted
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
 
 ----------------------------------------------------------------------
@@ -110,7 +110,7 @@ Procedure Send(
 );
 var msg: Message;
 Begin
-    assert(MultiSetCount(i: Net[dst], true) < NetMax) "Too many messages";
+    
     assert(hasOwnerToken -> !isundefined(val)) "Data Transfer Rule violated";
     assert(hasOwnerToken -> !hasBackupToken)) "Owner Token Transfer Rule violated";
     assert(hasOwnerToken -> Procs[src].hasBackupToken)) "Blocked Ownership Rule violated";
@@ -128,8 +128,9 @@ Begin
         msg.mtype = DestructionDone | 
         msg.mtype = StartTokenRec)
     then
-        MultiSetAdd(msg, TrNet[dst]);
+        TrNet[dst] := msg;
     else
+        assert(MultiSetCount(i: FaultNet[dst], true) < NetMax) "Too many messages";
         MultiSetAdd(msg, FaultNet[dst]);
     endif;
 End;
@@ -144,13 +145,19 @@ Begin
     error "Unhandled state!";
 End;
 
--- Sends a message to all sharers except rqst
-Procedure SendInvReqToSharers(rqst: Node);
+Function HasTRMsg(n:Node) : boolean;
 Begin
-    for n: Node do
-        -- TBD
-    endfor;
+  return !isundefined(TrNet[n]);
 End;
+
+Function IsTRMsg(msg:Message) : boolean;
+Begin
+  return (msg.mtype = IncSerialNum |
+          msg.mtype = BackupInv | 
+          msg.mtype = DestructionDone | 
+          msg.mtype = StartTokenRec);
+End;
+
 
 
 Procedure HomeReceive(msg:Message);
@@ -196,145 +203,72 @@ End;
 -- Processor actions (affecting coherency)
 
 ruleset n: Proc Do
-    alias p: Procs[n] Do
+    alias p: Procs[n] do
 
     --==== Store ====--
 
-    ruleset v: Value Do
+    ruleset v: Value do
 
-        rule "store-to-modified"
-            (p.state = P_M)
-        ==>
-            p.val := v;
-            LastWrite := p.val;
-        endrule;
-
-        rule "store-to-exclusive"
-            (p.state = P_E)
-        ==>
-            p.val := v;
-            LastWrite := p.val;
-            p.state := P_M;
-        endrule;
-
-        rule "store-to-shared"
-            (p.state = P_S)
-        ==>
-            Send(GetM, HomeType, n, VC0, undefined, 0);
-            p.state := P_SMad;
-        endrule;
-
-        rule "store-to-invalid"
-            (p.state = P_I)
-        ==>
-            Send(GetM, HomeType, n, VC0, undefined, 0);
-            p.state := P_IMad;
-        endrule;
         
     endruleset;
 
     --==== Load ====--
 
-    -- Shared and Modified states will hit so no need to put rule
-
-    rule "load-from-invalid"
-        (p.state = P_I)
-    ==>
-        Send(GetS, HomeType, n, VC0, undefined, 0);
-        p.state := P_ISd;
-    endrule;
-
     --==== Writeback ====--
 
-    rule "writeback-modified"
-        (p.state = P_M)
-    ==>
-        Send(PutM, HomeType, n, VC1, p.val, 0);
-        p.state := P_MIa;
-        -- p.val is still valid
-    endrule;
-
-    rule "writeback-exclusive"
-        (p.state = P_E)
-    ==>
-        Send(PutE, HomeType, n, VC1, undefined, 0);
-        p.state := P_MIa; -- EIa is same as MIa
-        -- p.val is still valid
-    endrule;
-
-    rule "writeback-shared"
-        (p.state = P_S)
-    ==>
-        Send(PutS, HomeType, n, VC0, undefined, 0);
-        p.state := P_SIa;
-        undefine p.val;
-    endrule;
-
-    endalias;
+    endalias; -- p
 endruleset;
 
--- Message delivery rules
+-- Message delivery rules per node
 ruleset n: Node do
 
-  alias trChan : TrNet[n];
+  alias faultChan : FaultNet[n] do
 
-  rule "receive-"
+  -- Rule to receive token recreation related messages
+  alias tr_msg : TrNet[n] do
+  rule "receive-TR-msg"
+    (HasTRMsg(n))
+  ==>
+    if IsMember(n, Home)
+    then
+      HomeReceive(tr_msg);
+    else
+      ProcReceive(n, tr_msg);
+    endif;
+  endrule;
+  endalias; -- tr_msg
 
-  choose midx: FaultNet[n] do
-    alias faultChan: FaultNet[n] do
-    alias msg: chan[midx] do
-    alias box: InBox[n] do
 
+  -- Rule to delete or process message
+  choose midx : faultChan do
+    alias msg : faultChan[midx] do
 
+    rule "inject-fault"
+      -- TODO: do we need a bit to ensure forward progress?
+      -- I don't think so since Murphi will collapse circular states
+      MultiSetRemove(faultIdx, faultChan);
+    endrule;
 
-    rule "receive-net"
-      (isundefined(box[msg.vc].mtype))
+    rule "process-message"
+      (!HasTRMsg(n))  -- TR messages take priority
     ==>
-
       if IsMember(n, Home)
       then
         HomeReceive(msg);
       else
-        ProcReceive(msg, n);
+        ProcReceive(n, msg);
       endif;
-
-      if ! msg_processed
-      then
-        -- The node refused the message, stick it in the InBox to block the VC.
-        box[msg.vc] := msg;
-      endif;
-    
-      MultiSetRemove(midx, chan);
-    
     endrule;
-  
-    endalias
-    endalias;
-    endalias;
-  endchoose;  
 
-  -- Try to deliver a message from a blocked VC; perhaps the node can handle it now
-  ruleset vc: VCType do
-      rule "receive-blocked-vc"
-          (! isundefined(InBox[n][vc].mtype))
-      ==>
-          if IsMember(n, Home)
-          then
-              HomeReceive(InBox[n][vc]);
-          else
-              ProcReceive(InBox[n][vc], n);
-          endif;
+    endalias; -- msg
 
-          if msg_processed
-          then
-              -- Message has been handled, forget it
-              undefine InBox[n][vc];
-          endif;
-      
-      endrule;
-  endruleset;
+  endchoose; -- midx
+
+  endalias; -- faultChan
 
 endruleset;
+
+
 
 ----------------------------------------------------------------------
 -- Startstate
