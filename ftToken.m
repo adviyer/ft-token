@@ -1,5 +1,5 @@
 
--- 3-hop MSI Protocol
+-- Fault-tolerant token coherence protocol
 
 ----------------------------------------------------------------------
 -- Constants
@@ -7,15 +7,10 @@
 const
   ProcCount: 3;          -- number processors
   ValueCount:   2;       -- number of data values.
-  VC0: 0;                -- Requests
-  VC1: 1;                -- Fwd/Inv
-  VC2: 2;                -- Ack/Data
   QMax: 2;
-  NumVCs: VC2 - VC0 + 1;
-  NetMax: ProcCount+1;
-  -- TBD: Change this
-  Bound: 10;
-  MaxSerialId: 40;
+  NetMax: ProcCount+1; -- TODO: needs to be a function of MaxPerfMsgs?
+  MaxPerfMsgs: 2; -- Number of repeated perf reqs sent before persistent req
+  MaxTokenSerialNum: 3;
   
 
 ----------------------------------------------------------------------
@@ -28,35 +23,35 @@ type
     Home: enum {HomeType};      -- need enumeration for IsMember calls
     Node: union {Home, Proc};
 
-    VCType: VC0..NumVCs-1;
-    AckCountType: 0..ProcCount;
-    TokenCount: 0..ProcCount;
-    SerialType: 0..MaxSerialId;
-
+    SharerTokenCount: 0..(ProcCount-1);
+    PerfMsgCount: 0..MaxPerfMsgs;
+    SerialNumType: 0..MaxTokenSerialNum;
+    
     MessageType: enum {
-
-        GetS, GetX, Putt, WbAck, WbAckData, WbNack, Inv, Ack, Data, DataEx,
-        Unblock, UnblockEx, AckO, AckBd, UnblockPing,
-        WbPing, WbCancel, OwnerPing, NackO
-
+          GetS
+        , GetM
+        , IncSerialNum             -- (TRNet)
+        , BackupInv                -- (TRNet)
+        , DestructionDone          -- (TRNet) check data field to indicate DestructionDone with data
+        , ActivatePersistent
+        , DeactivatePersistent
+        , PingPersistent           -- consequence of lost persistent deactivate timeout
+        , AckO                     -- owner acknowledgement
+        , AckBD                    -- backup deletion acknowledgement
+        , StartTokenRec            -- (TRNet) start token recreation (only home can receive)
+        , Tokens                   -- token transfer message type
     };
 
+    
     Message:
         Record
-            /*
-             * do not need a destination for verification;
-             * the destination is indicated by which array
-             * entry in the Net the message is placed
-             */
             mtype: MessageType;
             src: Node;
-            vc: VCType;
             val: Value;
-            numAcks: AckCountType;
-            numToken: TokenCount;
+            numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
-            serialId: SerialType;
+            serialNum: SerialNumType;
         End;
 
     HomeState:
@@ -64,20 +59,27 @@ type
             state: enum {
                 -- TBD: Fill this
             };
-            owner: Node;
-            sharers: multiset [ProcCount] of Node;
-            val: Value; 
+            val: Value;
+            numSharerTokens: SharerTokenCount;
+            hasOwnerToken: boolean;
+            hasBackupToken: boolean;
         End;
 
     ProcState:
         Record
+            -- Current state must be coherent with token counts
             state: enum {
-                -- TBD: Fill this
+                  I
+                , Ir
+                , B
+                , S
+                , Ob
+                , O
+                , Mb
+                , M
             };
             val: Value;
-            acks: AckCountType;
-            acksGot: AckCountType;
-            numTokens: TokenCount;
+            numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
         End;
@@ -88,9 +90,8 @@ type
 var
     MainMem:  HomeState;
     Procs: array [Proc] of ProcState;
-    Net:   array [Node] of multiset [NetMax] of Message;  -- One multiset for each destination - messages are arbitrarily reordered by the multiset
-    InBox: array [Node] of array [VCType] of Message; -- If a message is not processed, it is placed in InBox, blocking that virtual channel
-    msg_processed: boolean;
+    FaultNet: array [Node] of multiset [NetMax] of Message;  -- Performance and persistent messages, can be deleted
+    TrNet: array [Node] of multiset [NetMax] of Message; -- Token recreation messages, cosmic ray proof, never deleted
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
 
 ----------------------------------------------------------------------
@@ -102,7 +103,6 @@ Procedure Send(
     src: Node;
     vc: VCType;
     val: Value;
-    numAcks: AckCountType;
     numToken: TokenCount;
     hasOwnerToken: boolean;
     hasBackupToken: boolean;
@@ -123,7 +123,15 @@ Begin
     msg.hasOwnerToken   := hasOwnerToken;
     msg.hasBackupToken  := hasBackupToken;
     msg.serialId        := serialId;
-    MultiSetAdd(msg, Net[dst]);
+    if (msg.mtype = IncSerialNum | 
+        msg.mtype = BackupInv | 
+        msg.mtype = DestructionDone | 
+        msg.mtype = StartTokenRec)
+    then
+        MultiSetAdd(msg, TrNet[dst]);
+    else
+        MultiSetAdd(msg, FaultNet[dst]);
+    endif;
 End;
 
 Procedure ErrorUnhandledMsg(msg:Message; n:Node);
@@ -165,6 +173,7 @@ Procedure ProcReceive(msg: Message; p: Proc);
 Begin
 --  put "Receiving "; put msg.mtype; put " on VC"; put msg.vc; 
 --  put " at proc "; put p; put "\n";
+-- RECEIVING ORDER: TrNET > Persistent msg in FaultNet > Other msg in faultnet
 
     -- default to 'processing' message.  set to false otherwise
     msg_processed := true;
@@ -266,12 +275,18 @@ endruleset;
 
 -- Message delivery rules
 ruleset n: Node do
-  choose midx: Net[n] do
-    alias chan: Net[n] do
+
+  alias trChan : TrNet[n];
+
+  rule "receive-"
+
+  choose midx: FaultNet[n] do
+    alias faultChan: FaultNet[n] do
     alias msg: chan[midx] do
     alias box: InBox[n] do
 
-    -- Pick a random message in the network and delivier it
+
+
     rule "receive-net"
       (isundefined(box[msg.vc].mtype))
     ==>
@@ -396,14 +411,14 @@ invariant "Write Rule"
   Forall n : Proc Do  
     Procs[n].state = P_M
     ->
-    Procs[n].numTokens = ProcCount & Procs[n].hasOwnerToken = true
+    Procs[n].hasOwnerToken = true & Procs[n].hasBackupToken = true
   end;
 
 invariant "Read Rule"
   Forall n : Proc Do  
     Procs[n].state = P_S
     ->
-    Procs[n].numTokens >= 1 & Procs[n].hasOwnerToken = false
+    Procs[n].hasOwnerToken = false & Procs[n].hasBackupToken = false
   end;
 
 invariant "Valid-Data Bit Rule"
@@ -411,4 +426,28 @@ invariant "Valid-Data Bit Rule"
     Procs[n].numTokens = 0 | (Procs[n].numTokens = 1 & Procs[n].hasBackupToken)
     ->
     isundefined(Procs[n].val)
+  end;
+
+invariant "Maximum of one owned token"
+  Forall n : Proc Do  
+    Procs[n].hasOwnerToken = true
+    ->
+        Forall i : Proc Do 
+            if (Procs[n] != Procs[i])
+            then
+                Procs[i].hasOwnerToken = false
+            endif;
+        end; 
+  end;
+
+invariant "Maximum of one backup token"
+  Forall n : Proc Do  
+    Procs[n].hasBackupToken = true
+    ->
+        Forall i : Proc Do 
+            if (Procs[n] != Procs[i])
+            then
+                Procs[i].hasBackupToken = false
+            endif;
+        end; 
   end;
