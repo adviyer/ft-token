@@ -58,6 +58,16 @@ type
         Record
             state: enum {
                 -- TBD: Fill this
+                -- TODO: Do we need a backup state? A potential optimization is getting rid of the MainMem backup state and having if no backup
+                -- /owner token exists, then MainMem must have the most recent copy of data
+                -- TODO: Is a recreating token state (R) necessary for MainMem?
+                I   -- MainMem does not have any tokens
+              , B   -- NOTE: Have this state for now
+              , S   -- MainMem has one or more sharer tokens
+              , Ob
+              , O   -- MainMem has the owner token and, potentially, other sharer tokens
+              , Mb
+              , M   -- MainMem has every token
             };
             val: Value;
             numSharerTokens: SharerTokenCount;
@@ -70,7 +80,7 @@ type
             -- Current state must be coherent with token counts
             state: enum {
                   I
-                , Ir
+                , R     -- Recreating tokens state (entered when a fault is detected and a token recreation process is requested)
                 , B
                 , S
                 , Ob
@@ -82,6 +92,10 @@ type
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
+            req: MessageType;   -- Each proc needs to keep track of what request it is currently waiting a response for so re-issued requests can happen
+            -- curSerial: SerialNumType;   -- TODO: Mustafa do we need to keep track of this?
+            -- origSerial: SerialNumType;
+            -- persistentReq: 
         End;
 
 ----------------------------------------------------------------------
@@ -245,7 +259,7 @@ ruleset n: Node do
 
     rule "inject-fault"
       -- TODO: do we need a bit to ensure forward progress?
-      -- I don't think so since Murphi will collapse circular states
+      -- I dont think so since Murphi will collapse circular states
       MultiSetRemove(faultIdx, faultChan);
     endrule;
 
