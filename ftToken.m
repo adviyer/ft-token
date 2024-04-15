@@ -79,7 +79,7 @@ type
     ProcState:
         Record
             -- Current state must be coherent with token counts
-            state: enum {
+            state: enum {   -- TODO: Discuss with group whether we are using states or not
                   I
                 , R     -- Recreating tokens state (entered when a fault is detected and a token recreation process is requested)
                 , B
@@ -97,7 +97,8 @@ type
             curSerial: SerialNumType;
             curPersistentRequester: Node;
             isPersistent: boolean;
-            issuedPersistent: boolean;
+            -- TODO: How should we add a persistent request table in Murphi?
+            -- TODO: We also need to add a serial number table per cache
         End;
 
 ----------------------------------------------------------------------
@@ -109,6 +110,7 @@ var
     FaultNet: array [Node] of multiset [NetMax] of Message;  -- Performance and persistent messages, can be deleted
     TrNet: array [Node] of Message; -- Token recreation messages, cosmic ray proof, never deleted
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
+
 
 ----------------------------------------------------------------------
 -- Procedures
@@ -191,19 +193,18 @@ Begin
     -- Receive tokens
     if p.curSerial = msg.serialNum
     then
-      p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;
-      
+
+      p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;   -- TODO: Make sure that all 'Token' messages have numSharerTokens field defined
+
       if msg.hasOwnerToken
       then
         assert(!isundefined(msg.val));
+        assert(isundefined(p.hasOwnerToken));
         p.hasOwnerToken := true;
         p.val := msg.val;
+        BroadcastFaultMsg(AckO, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, msg.serialId); -- TODO: Does this message need a 'new' serialId?
       endif;
 
-      if msg.hasBackupToken
-      then
-        p.hasBackupToken := true;
-      endif;
     endif;
 
     -- Set appropriate state based tokens
@@ -231,7 +232,7 @@ Begin
 
       if p.hasBackupToken
       then  
-        p.state := B;
+        p.state := B;   -- TODO: When would this scenario ever happen?
       else
         if p.numSharerTokens > 0
         then
@@ -287,44 +288,109 @@ Begin
     alias pot: Procs[p].hasOwnerToken do
     alias pbt: Procs[p].hasBackupToken do
     alias pcs: Procs[p].curSerial do
-    alias pip: Procs[n].isPersistent do
-    alias piss: Procs[n].issuedPersistent do
+    alias pip: Procs[p].isPersistent do
 
-    switch msg.mtype
+    switch msg.mtype    -- TODO: Some messages are meant to be dealt with by all processors while some are meant for just specific processors (i.e. Pings). How do we want to split this up?
+    -- (contd.) a broad if else or more smaller if statements (i.e. if msg.dst = p)?
       
-      case GetS:
+      case GetS:    -- README: In TokenB, which FtTokenCMP is based on, procs in S ignore transient read reqs
+      -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
+        if ps = M then
+          BroadcastFaultMsg(Tokens, msg.src, p, pv, pst, true, msg.serialId);
+          pst := 0;
+          pot := false;
+          ps := B;
+        else
+          if ps = O then
+            if pst > 0 then
+              BroadcastFaultMsg(Tokens, msg.src, p, pv, 1 false, msg.serialId);
+              pst := pst - 1;
+            else    -- Owner must send Owner token as it has no other available shared tokens
+              BroadcastFaultMsg(Tokens, msg.src, p, pv, 0, true, msg.serialId);
+              pot := false;
+              ps := B;
+            endif;
+          endif;
+        endif;
 
       case GetM:
+        if pot then         -- Proc is in state O or M
+          BroadcastFaultMsg(Tokens, msg.src, p, pv, pst, true, msg.serialId);
+          pst := 0;
+          pot := false;
+          ps := B;
+        else
+          if pst > 0 then   -- Proc is in state S
+            BroadcastFaultMsg(Tokens, msg.src, p, UNDEFINED, pst, false, msg.serialId);
+            pst := 0;
+            ps := I;
+          endif;
+        endif;
 
-      case IncSerialNum:
+      case SetSerialNum:
+        -- TODO: What are we using the serial numbers in our Proc Record for at the moment? Is it for bounded faults or does it
+        -- (contd.) symbolize the token serial numbers?
+        
 
       case BackupInv:
+        if pbt then   -- Having backup token while receiving BackupInv implies state B
+          pbt := false;
+          undefine pv;
+        endif;
 
       case DestructionDone:
+        if !IsUndefined(msg.val) then
+          pst := MaxSharerTokens;
+          pot := true;
+          pbt := true;
+          ps := M;
+        else
+          -- TODO: restart timeouts
+        endif;
 
       case ActivatePersistent:
+        if IsEntry(msg.src, prt) then
+          ClearEntry(msg.src, prt);   -- Will not need to clear entry technically because we are only dealing with 1 address
+          AddEntry(msg.src, prt);
+          SetMark(msg.src, prt);
+        else
+          AddEntry(msg.src, prt);     -- TODO: Add all of these persistent request table specific procedures
+        endif;
 
       case DeactivatePersistent:
+        -- TODO: Remove persistent request table entry
+        -- TODO: 'Mark' Marked Bit for all valid entries (set to 1) (we are only dealing with one address)
 
       case PingPersistent:
-        if pip then
-          BroadcastFaultMsg(issued)
+        if msg.dst = p then
+          if pip then
+            BroadcastFaultMsg(ActivatePersistent, ); -- TODO: This is really inefficient. Why would I send an ActivatePersistent message to a ping when I can just not send any message? Just have the Lost Persistent Deactivation
+            -- (contd.) timer restart as soon as it sends out a ping
+          else  -- Persistent request was satisfied
+            BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED); -- TODO: I currently have msg.dst as UNDEFINED as this message is meant for every processor. Is this fine?
+          endif;
+        endif;
 
       case AckO:
         if pbt & !pot then    -- Must be in Backup state
-          Send(AckBD, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+          BroadcastFaultMsg(AckBD, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
           pbt := false;
+          undefine pv;
+          ps := I;
         endif;
 
       case AckBD:
         if !pbt & pot then    -- In blocked ownership state
           pbt := true;
+          if pst = MaxSharerTokens then
+            ps := M;
+          else    -- Have to be in O state if you don't have max number of sharer tokens
+            ps := O;
+          endif;
         endif;
 
       case Tokens:
-        
-
-
+        ReceiveTokens(p, msg);
       
     endswitch;
 
