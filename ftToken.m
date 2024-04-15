@@ -11,6 +11,7 @@ const
   NetMax: ProcCount+1; -- TODO: needs to be a function of MaxPerfMsgs?
   MaxPerfMsgs: 2; -- Number of repeated perf reqs sent before persistent req
   MaxTokenSerialNum: 3;
+  MaxSharerTokens: (ProcCount-1);
   
 
 ----------------------------------------------------------------------
@@ -40,6 +41,7 @@ type
         , AckBD                    -- backup deletion acknowledgement
         , StartTokenRec            -- (TRNet) start token recreation (only home can receive)
         , Tokens                   -- token transfer message type
+        , IncSerialNumAck
     };
 
     
@@ -50,7 +52,6 @@ type
             val: Value;
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
-            hasBackupToken: boolean;
             serialNum: SerialNumType;
         End;
 
@@ -93,9 +94,10 @@ type
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
             req: MessageType;   -- Each proc needs to keep track of what request it is currently waiting a response for so re-issued requests can happen
-            -- curSerial: SerialNumType;   -- TODO: Mustafa do we need to keep track of this?
-            -- origSerial: SerialNumType;
-            -- persistentReq: 
+            curSerial: SerialNumType;
+            curPersistentRequester: Node;
+            isPersistent: boolean;
+            issuedPersistent: boolean;
         End;
 
 ----------------------------------------------------------------------
@@ -111,42 +113,52 @@ var
 ----------------------------------------------------------------------
 -- Procedures
 ----------------------------------------------------------------------
-Procedure Send(
+Procedure BroadcastFaultMsg (
     mtype: MessageType;
     dst: Node;
     src: Node;
-    vc: VCType;
     val: Value;
-    numToken: TokenCount;
+    numSharerTokens: TokenCount;
     hasOwnerToken: boolean;
-    hasBackupToken: boolean;
     serialId: SerialType;
 );
 var msg: Message;
 Begin
-    
+    assert(!IsTRMsg(msg));
     assert(hasOwnerToken -> !isundefined(val)) "Data Transfer Rule violated";
-    assert(hasOwnerToken -> !hasBackupToken)) "Owner Token Transfer Rule violated";
-    assert(hasOwnerToken -> Procs[src].hasBackupToken)) "Blocked Ownership Rule violated";
+    assert(hasOwnerToken -> Procs[src].hasBackupToken) "Blocked Ownership Rule violated";
+    
     msg.mtype           := mtype;
+    msg.dst             := dst;
     msg.src             := src;
-    msg.vc              := vc;
     msg.val             := val;
-    msg.numAcks         := numAcks;
-    msg.numToken        := numToken;
+    msg.numSharerTokens := numSharerTokens;
     msg.hasOwnerToken   := hasOwnerToken;
-    msg.hasBackupToken  := hasBackupToken;
     msg.serialId        := serialId;
-    if (msg.mtype = IncSerialNum | 
-        msg.mtype = BackupInv | 
-        msg.mtype = DestructionDone | 
-        msg.mtype = StartTokenRec)
-    then
-        TrNet[dst] := msg;
-    else
-        assert(MultiSetCount(i: FaultNet[dst], true) < NetMax) "Too many messages";
-        MultiSetAdd(msg, FaultNet[dst]);
-    endif;
+
+    -- Iterate through each node's multiset in faultnet and add the message
+    Forall node : FaultNet Do
+      assert(MultiSetCount(i: FaultNet[node], true) < NetMax) "Too many messages";
+      MultiSetAdd(msg, FaultNet[node]);
+    End;
+End;
+
+Procedure SendTRMsg (
+    mtype: MessageType;
+    dst: Node;
+    src: Node;
+    val: Value;
+);
+var msg: Message;
+Begin
+  assert(IsTRMsg(msg));
+
+  msg.mtype   := mtype;
+  msg.dst     := dst;
+  msg.src     := src;
+  msg.val     := val;
+
+  TrNet[dst] := msg;
 End;
 
 Procedure ErrorUnhandledMsg(msg:Message; n:Node);
@@ -157,6 +169,81 @@ End;
 Procedure ErrorUnhandledState();
 Begin
     error "Unhandled state!";
+End;
+
+
+Procedure IncTokenSerialNum(n:Node);
+Begin
+    if Procs[n].curSerial = MaxTokenSerialNum
+    then
+      Procs[n].curSerial = 0;
+    else
+      Procs[n].curSerial = Procs[n].curSerial + 1;
+    endif;
+End;
+
+Procedure ReceiveTokens(n:Node, msg:Message);
+Begin
+    alias p : Procs[n] do
+
+    assert(msg.mtype = Tokens);
+
+    -- Receive tokens
+    if p.curSerial = msg.serialNum
+    then
+      p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;
+      
+      if msg.hasOwnerToken
+      then
+        assert(!isundefined(msg.val));
+        p.hasOwnerToken := true;
+        p.val := msg.val;
+      endif;
+
+      if msg.hasBackupToken
+      then
+        p.hasBackupToken := true;
+      endif;
+    endif;
+
+    -- Set appropriate state based tokens
+    if p.hasOwnerToken
+    then
+
+      if p.hasBackupToken
+      then  
+        if p.numSharerTokens = MaxSharerTokens
+        then
+          p.state := M;
+        else
+          p.state := O;
+        endif;
+      else
+        if p.numSharerTokens = MaxSharerTokens
+        then
+          p.state := Mb;
+        else
+          p.state := Ob;
+        endif;      
+      endif;
+    
+    else
+
+      if p.hasBackupToken
+      then  
+        p.state := B;
+      else
+        if p.numSharerTokens > 0
+        then
+          p.state := S;
+        else
+          p.state := I;
+        endif;      
+      endif;
+      
+    endif;
+    
+    endalias; -- p
 End;
 
 Function HasTRMsg(n:Node) : boolean;
@@ -172,8 +259,6 @@ Begin
           msg.mtype = StartTokenRec);
 End;
 
-
-
 Procedure HomeReceive(msg:Message);
 Begin
 
@@ -182,8 +267,6 @@ Begin
 --  put " at home -- "; put MainMem.state;
 
     -- default to 'processing' message.  set to false otherwise
-    msg_processed := true;
-
     switch MainMem.state
 
     endswitch;
@@ -197,13 +280,261 @@ Begin
 -- RECEIVING ORDER: TrNET > Persistent msg in FaultNet > Other msg in faultnet
 
     -- default to 'processing' message.  set to false otherwise
-    msg_processed := true;
 
     alias ps: Procs[p].state do
     alias pv: Procs[p].val do
+    alias pst: Procs[p].numSharerTokens do
+    alias pot: Procs[p].hasOwnerToken do
+    alias pbt: Procs[p].hasBackupToken do
+    alias pcs: Procs[p].curSerial do
+    alias pip: Procs[n].isPersistent do
+    alias piss: Procs[n].issuedPersistent do
+
+    switch msg.mtype
+      
+      case GetS:
+
+      case GetM:
+
+      case IncSerialNum:
+
+      case BackupInv:
+
+      case DestructionDone:
+
+      case ActivatePersistent:
+
+      case DeactivatePersistent:
+
+      case PingPersistent:
+        if pip then
+          BroadcastFaultMsg(issued)
+
+      case AckO:
+        if pbt & !pot then    -- Must be in Backup state
+          Send(AckBD, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+          pbt := false;
+        endif;
+
+      case AckBD:
+        if !pbt & pot then    -- In blocked ownership state
+          pbt := true;
+        endif;
+
+      case Tokens:
+        
+
+
+      
+    endswitch;
 
     switch ps
+      case I:
+        switch msg.mtype
+
+          case IncSerialNum:
+            IncTokenSerialNum(p);
+            -- Send inc serial num ack
           
+          case DestructionDone:
+            
+            if !isundefined(msg.val)
+            then
+              pst := MaxSharerTokens;
+              hasOwnerToken := true;
+              hasBackupToken := true;
+              ps := M;
+            else
+              -- TODO: restart timeouts
+            endif;
+          
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case Tokens:
+            ReceiveTokens(p, msg);
+          
+        endswitch;
+
+      case B:
+        switch msg.mtype:
+
+          case IncSerialNum:
+            IncTokenSerialNum();
+            -- Send inc ack
+
+          
+          case BackupInv:
+
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+
+          case StartTokenRec:
+
+          case Tokens:
+        endswitch;
+      case S:
+        switch msg.mtype:
+          case GetS:
+            -- TODO: Do we handle this? Currently we don't handle this
+          case GetM:
+            Send(Tokens, msg.src, p, pv, pst, false, msg.serialId)
+          case IncSerialNum:
+          
+          case BackupInv:
+
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+
+          case StartTokenRec:
+
+          case Tokens:
+        endswitch;
+      case Ob:
+        switch msg.mtype:
+          case GetS:
+          
+          case GetM:
+
+          case IncSerialNum:
+          
+          case BackupInv:
+
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+            pbt := true;
+            ps := O;
+          case StartTokenRec:
+
+          case Tokens:
+        endswitch;
+      case O:
+        switch msg.mtype:
+          case GetS:
+            if pst > 0 then
+              Send(Tokens, msg.src, p, pv, 1, false, msg.serialId);
+              pst := pst - 1;
+            else
+              Send(Tokens, msg.src, p, pv, 0, true, msg.serialId);
+              pot := false;
+              ps := B;
+            endif;
+          case GetM:
+            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
+            pst := 0;
+            pot := false;
+            ps := B;
+
+          case IncSerialNum:
+          
+          case BackupInv:
+
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+
+          case StartTokenRec:
+
+          case Tokens:
+            ReceiveTokens(p, msg);
+        endswitch;
+      case Mb:
+        switch msg.mtype:
+          case GetS:
+          
+          case GetM:
+
+          case IncSerialNum:
+          
+          case BackupInv:
+
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+            pbt := true;
+            ps := M;
+          case StartTokenRec:
+
+          case Tokens:
+        endswitch;
+      case M:
+        switch msg.mtype:
+          case GetS:
+            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
+            pst := 0;
+            pot := false;
+            ps := B;
+          case GetM:
+            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
+            pst := 0;
+            pot := false;
+            ps := B;
+          case IncSerialNum:
+            
+          case BackupInv:
+            
+          case DestructionDone:
+
+          case ActivatePersistent:
+
+          case DeactivatePersistent:
+
+          case PingPersistent:
+
+          case AckO:
+
+          case AckBD:
+
+          case StartTokenRec:
+
+          case Tokens:
+        endswitch;          
     endswitch;
     
     endalias;
@@ -397,5 +728,13 @@ invariant "Maximum of one backup token"
             then
                 Procs[i].hasBackupToken = false
             endif;
-        end; 
+        end;
+  end;
+
+invariant "Backup state implies no tokens except backup"
+  Forall n : Proc Do
+    Procs[n].state = B
+    ->
+      Procs[n].hasBackupToken = true & Procs[n].numSharerTokens = 0
+       & Procs[n].hasOwnerToken = false
   end;
