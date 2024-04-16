@@ -27,7 +27,7 @@ type
     SharerTokenCount: 0..(ProcCount-1);
     PerfMsgCount: 0..MaxPerfMsgs;
     SerialNumType: 0..MaxTokenSerialNum;
-    
+
     MessageType: enum {
           GetS
         , GetM
@@ -95,8 +95,8 @@ type
             hasBackupToken: boolean;
             req: MessageType;   -- Each proc needs to keep track of what request it is currently waiting a response for so re-issued requests can happen
             curSerial: SerialNumType;
-            curPersistentRequester: Node;
-            isPersistent: boolean;
+            curPersistentRequester: Proc;
+            persistentTable: array [Proc] of boolean;
             -- TODO: How should we add a persistent request table in Murphi?
             -- TODO: We also need to add a serial number table per cache
         End;
@@ -174,16 +174,6 @@ Begin
 End;
 
 
-Procedure IncTokenSerialNum(n:Node);
-Begin
-    if Procs[n].curSerial = MaxTokenSerialNum
-    then
-      Procs[n].curSerial = 0;
-    else
-      Procs[n].curSerial = Procs[n].curSerial + 1;
-    endif;
-End;
-
 Procedure ReceiveTokens(n:Node, msg:Message);
 Begin
     alias p : Procs[n] do
@@ -193,8 +183,8 @@ Begin
     -- Receive tokens
     if p.curSerial = msg.serialNum
     then
-
-      p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;   -- TODO: Make sure that all 'Token' messages have numSharerTokens field defined
+      assert(!isundefined(msg.numSharerTokens));
+      p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;
 
       if msg.hasOwnerToken
       then
@@ -202,49 +192,64 @@ Begin
         assert(isundefined(p.hasOwnerToken));
         p.hasOwnerToken := true;
         p.val := msg.val;
-        BroadcastFaultMsg(AckO, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, msg.serialId); -- TODO: Does this message need a 'new' serialId?
+        BroadcastFaultMsg(AckO, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
       endif;
-
-    endif;
-
-    -- Set appropriate state based tokens
-    if p.hasOwnerToken
-    then
-
-      if p.hasBackupToken
-      then  
-        if p.numSharerTokens = MaxSharerTokens
-        then
-          p.state := M;
-        else
-          p.state := O;
-        endif;
-      else
-        if p.numSharerTokens = MaxSharerTokens
-        then
-          p.state := Mb;
-        else
-          p.state := Ob;
-        endif;      
-      endif;
-    
-    else
-
-      if p.hasBackupToken
-      then  
-        p.state := B;   -- TODO: When would this scenario ever happen?
-      else
-        if p.numSharerTokens > 0
-        then
-          p.state := S;
-        else
-          p.state := I;
-        endif;      
-      endif;
-      
     endif;
     
     endalias; -- p
+End;
+
+Procedure PersistentTableActivate(rqstr:Proc)
+Begin
+  alias p : Procs[rqstr] Do
+
+  p.persistentTable[rqstr] := true;
+
+  if isundefined(p.curPersistentRequester) | rqstr < p.curPersistentRequester
+  then
+    p.curPersistentRequester := rqstr;
+  end;
+
+  endalias; -- p
+End;
+
+Procedure PersistentTableDeactivate(rqstr:Proc)
+Begin
+  alias p : Procs[rqstr] Do
+
+  p.persistentTable[rqstr] := false;
+  undefine p.curPersistentRequester;
+
+  Forall n : Proc Do
+    if p.persistentTable[n] = true & IsUndefined(p.curPersistentRequester) then
+      p.curPersistentRequester := n;
+    endif;
+  End;
+  
+  endalias; -- p
+End;
+
+Procedure SendAllTokens(dst:Node, src:Node)
+Begin
+  alias p: Node[src] do
+
+  if p.hasOwnerToken & p.hasBackupToken
+  then
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, true, p.curSerial);
+    p.numSharerTokens := 0;
+    p.hasOwnerToken := false;
+  else
+    BroadcastFaultMsg(Tokens, dst, src, UNDEFINED, p.numSharerTokens, false, p.curSerial);
+    p.numSharerTokens := 0;
+    undefine p.val;
+  endif;
+
+  endalias; -- p
+End;
+
+Function IsEntry(p:Proc)
+Begin
+  return p.persistentTable[p];
 End;
 
 Function HasTRMsg(n:Node) : boolean;
@@ -262,348 +267,198 @@ End;
 
 Procedure HomeReceive(msg:Message);
 Begin
-
+ alias h : MainMem do
     -- Debug output may be helpful:
 --  put "Receiving "; put msg.mtype; put " on VC"; put msg.vc; 
 --  put " at home -- "; put MainMem.state;
 
     -- default to 'processing' message.  set to false otherwise
-    switch MainMem.state
-
-    endswitch;
-End;
-
-
-Procedure ProcReceive(msg: Message; p: Proc);
-Begin
---  put "Receiving "; put msg.mtype; put " on VC"; put msg.vc; 
---  put " at proc "; put p; put "\n";
--- RECEIVING ORDER: TrNET > Persistent msg in FaultNet > Other msg in faultnet
-
-    -- default to 'processing' message.  set to false otherwise
-
-    alias ps: Procs[p].state do
-    alias pv: Procs[p].val do
-    alias pst: Procs[p].numSharerTokens do
-    alias pot: Procs[p].hasOwnerToken do
-    alias pbt: Procs[p].hasBackupToken do
-    alias pcs: Procs[p].curSerial do
-    alias pip: Procs[p].isPersistent do
-
-    switch msg.mtype    -- TODO: Some messages are meant to be dealt with by all processors while some are meant for just specific processors (i.e. Pings). How do we want to split this up?
-    -- (contd.) a broad if else or more smaller if statements (i.e. if msg.dst = p)?
-      
+    switch msg.mtype
       case GetS:    -- README: In TokenB, which FtTokenCMP is based on, procs in S ignore transient read reqs
       -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
-        if ps = M then
-          BroadcastFaultMsg(Tokens, msg.src, p, pv, pst, true, msg.serialId);
-          pst := 0;
-          pot := false;
-          ps := B;
+        if h.hasOwnerToken & h.hasBackupToken
+        then
+          BroadcastFaultMsg(Tokens, msg.src, h, h.val, h.numSharerTokens, true, h.curSerial);
+          h.hasOwnerToken := false;
+          h.numSharerTokens := 0;
         else
-          if ps = O then
-            if pst > 0 then
-              BroadcastFaultMsg(Tokens, msg.src, p, pv, 1 false, msg.serialId);
-              pst := pst - 1;
-            else    -- Owner must send Owner token as it has no other available shared tokens
-              BroadcastFaultMsg(Tokens, msg.src, p, pv, 0, true, msg.serialId);
-              pot := false;
-              ps := B;
-            endif;
+          if h.numSharerTokens > 0
+          then
+            BroadcastFaultMsg(Tokens, msg.src, h, h.val, h.numSharerTokens, false, h.curSerial);
+            h.numSharerTokens := 0;
           endif;
         endif;
 
       case GetM:
-        if pot then         -- Proc is in state O or M
-          BroadcastFaultMsg(Tokens, msg.src, p, pv, pst, true, msg.serialId);
-          pst := 0;
-          pot := false;
-          ps := B;
+        SendAllTokens(msg.src, h);
+
+      case SetSerialNum:
+        h.curSerial := msg.serialId;
+        if h.hasOwnerToken then
+          SendTRMsg(IncSerialNumAck, MainMem, h, h.val);
+          h.numSharerTokens := 0;
+          h.hasOwnerToken := false;
         else
-          if pst > 0 then   -- Proc is in state S
-            BroadcastFaultMsg(Tokens, msg.src, p, UNDEFINED, pst, false, msg.serialId);
-            pst := 0;
-            ps := I;
+          SendTRMsg(IncSerialNumAck, MainMem, h, UNDEFINED);
+          h.numSharerTokens := 0;
+        endif;
+      
+      case BackupInv:
+        if h.hasBackupToken
+        then
+          h.hasBackupToken := false;
+          undefine h.val;
+        endif;
+
+      case DestructionDone:        
+        
+        if !IsUndefined(msg.val) -- Destruction done w/ data
+        then
+          h.val := msg.val;
+        endif;
+
+        assert(!isundefined(h.val));
+        h.numSharerTokens := MaxSharerTokens;
+        h.hasOwnerToken := true;
+        h.hasBackupToken := true;
+
+      case ActivatePersistent:
+        PersistentTableActivate(msg.src);
+        -- Memory can never be the persistent requester
+        SendAllTokens(h.curPersistentRequester, h);
+
+      case DeactivatePersistent:
+        -- TODO: Remove persistent request table entry
+        PersistentTableDeactivate(msg.src);
+
+      case PingPersistent:
+        -- Shouldn't ever get pinged
+
+      case AckO:
+        if h.hasBackupToken & !h.hasOwnerToken then    -- Must be in Backup state
+          BroadcastFaultMsg(AckBD, msg.src, h, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+          h.hasBackupToken := false;
+          undefine h.val;
+        endif;
+
+      case AckBD:
+        if !h.hasBackupToken & h.hasOwnerToken then    -- In blocked ownership state
+          h.hasBackupToken := true;
+        endif;
+
+      case Tokens:
+        ReceiveTokens(h, msg);
+    endswitch;
+End;
+
+
+Procedure ProcReceive(msg: Message; n: Proc);
+Begin
+    put "Receiving "; put msg.mtype; put " at proc "; put p; put "\n";
+
+    alias p: Procs[n] do
+
+    -- Note: (dst == undefined) -> broadcast
+    -- If we are not the intended dst, do nothing
+    if !isundefined(msg.dst) & msg.dst != n
+    then
+      return;
+    endif;
+
+    switch msg.mtype
+
+      case GetS:    -- README: In TokenB, which FtTokenCMP is based on, procs in S ignore transient read reqs
+      -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
+        if p.hasOwnerToken & p.hasBackupToken
+        then
+          BroadcastFaultMsg(Tokens, msg.src, p, p.val, p.numSharerTokens, true, p.curSerial);
+          p.hasOwnerToken := false;
+          p.numSharerTokens := 0;
+        else
+          if p.numSharerTokens > 0
+          then
+            BroadcastFaultMsg(Tokens, msg.src, p, p.val, p.numSharerTokens, false, p.curSerial);
+            p.numSharerTokens := 0;
           endif;
         endif;
+
+      case GetM:
+        SendAllTokens(msg.src, p);
 
       case SetSerialNum:
         -- TODO: What are we using the serial numbers in our Proc Record for at the moment? Is it for bounded faults or does it
         -- (contd.) symbolize the token serial numbers?
-        
-
-      case BackupInv:
-        if pbt then   -- Having backup token while receiving BackupInv implies state B
-          pbt := false;
-          undefine pv;
-        endif;
-
-      case DestructionDone:
-        if !IsUndefined(msg.val) then
-          pst := MaxSharerTokens;
-          pot := true;
-          pbt := true;
-          ps := M;
+        p.curSerial := msg.serialId;
+        if p.hasOwnerToken then
+          SendTRMsg(IncSerialNumAck, MainMem, p, p.val);
+          p.numSharerTokens := 0;
+          p.hasOwnerToken := false;
         else
-          -- TODO: restart timeouts
+          SendTRMsg(IncSerialNumAck, MainMem, p, UNDEFINED);
+          p.numSharerTokens := 0;
         endif;
+      
+      case BackupInv:
+        if p.hasBackupToken
+        then
+          p.hasBackupToken := false;
+          undefine p.val;
+        endif;
+
+      case DestructionDone:        
+        
+        if !IsUndefined(msg.val) -- Destruction done w/ data
+        then
+          p.val := msg.val;
+        endif;
+
+        assert(!isundefined(p.val));
+        p.numSharerTokens := MaxSharerTokens;
+        p.hasOwnerToken := true;
+        p.hasBackupToken := true;
+        -- else
+          -- TODO: restart timeouts
+        -- endif;
 
       case ActivatePersistent:
-        if IsEntry(msg.src, prt) then
-          ClearEntry(msg.src, prt);   -- Will not need to clear entry technically because we are only dealing with 1 address
-          AddEntry(msg.src, prt);
-          SetMark(msg.src, prt);
-        else
-          AddEntry(msg.src, prt);     -- TODO: Add all of these persistent request table specific procedures
+        PersistentTableActivate(msg.src);
+        -- if I am not the persistent requester, send all tokens
+        if p != p.curPersistentRequester
+        then
+          SendAllTokens(p.curPersistentRequester, p);
         endif;
 
       case DeactivatePersistent:
-        -- TODO: Remove persistent request table entry
-        -- TODO: 'Mark' Marked Bit for all valid entries (set to 1) (we are only dealing with one address)
+        PersistentTableDeactivate(msg.src);
 
       case PingPersistent:
-        if msg.dst = p then
-          if pip then
-            BroadcastFaultMsg(ActivatePersistent, ); -- TODO: This is really inefficient. Why would I send an ActivatePersistent message to a ping when I can just not send any message? Just have the Lost Persistent Deactivation
-            -- (contd.) timer restart as soon as it sends out a ping
-          else  -- Persistent request was satisfied
-            BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED); -- TODO: I currently have msg.dst as UNDEFINED as this message is meant for every processor. Is this fine?
-          endif;
+        if !IsEntry(p) then
+         BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED); -- TODO: I currently have msg.dst as UNDEFINED as this message is meant for every processor. Is this fine?
         endif;
 
       case AckO:
-        if pbt & !pot then    -- Must be in Backup state
+        if p.hasBackupToken & !p.hasOwnerToken then    -- Must be in Backup state
           BroadcastFaultMsg(AckBD, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
-          pbt := false;
-          undefine pv;
-          ps := I;
+          p.hasBackupToken := false;
+          undefine p.val;
         endif;
 
       case AckBD:
-        if !pbt & pot then    -- In blocked ownership state
-          pbt := true;
-          if pst = MaxSharerTokens then
-            ps := M;
-          else    -- Have to be in O state if you don't have max number of sharer tokens
-            ps := O;
-          endif;
+        if !p.hasBackupToken & p.hasOwnerToken then    -- In blocked ownership state
+          p.hasBackupToken := true;
         endif;
 
       case Tokens:
-        ReceiveTokens(p, msg);
-      
+        if !isundefined(p.curPersistentRequester) & p.curPersistentRequester != p & msg.serialId = p.curSerial
+        then
+          -- Forward received tokens to persistent requester (that's not self)
+          BroadcastFaultMsg(Tokens, p.curPersistentRequester, p, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId);
+        else
+          ReceiveTokens(p, msg);
+        endif;
+        
     endswitch;
 
-    switch ps
-      case I:
-        switch msg.mtype
-
-          case IncSerialNum:
-            IncTokenSerialNum(p);
-            -- Send inc serial num ack
-          
-          case DestructionDone:
-            
-            if !isundefined(msg.val)
-            then
-              pst := MaxSharerTokens;
-              hasOwnerToken := true;
-              hasBackupToken := true;
-              ps := M;
-            else
-              -- TODO: restart timeouts
-            endif;
-          
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case Tokens:
-            ReceiveTokens(p, msg);
-          
-        endswitch;
-
-      case B:
-        switch msg.mtype:
-
-          case IncSerialNum:
-            IncTokenSerialNum();
-            -- Send inc ack
-
-          
-          case BackupInv:
-
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-
-          case StartTokenRec:
-
-          case Tokens:
-        endswitch;
-      case S:
-        switch msg.mtype:
-          case GetS:
-            -- TODO: Do we handle this? Currently we don't handle this
-          case GetM:
-            Send(Tokens, msg.src, p, pv, pst, false, msg.serialId)
-          case IncSerialNum:
-          
-          case BackupInv:
-
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-
-          case StartTokenRec:
-
-          case Tokens:
-        endswitch;
-      case Ob:
-        switch msg.mtype:
-          case GetS:
-          
-          case GetM:
-
-          case IncSerialNum:
-          
-          case BackupInv:
-
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-            pbt := true;
-            ps := O;
-          case StartTokenRec:
-
-          case Tokens:
-        endswitch;
-      case O:
-        switch msg.mtype:
-          case GetS:
-            if pst > 0 then
-              Send(Tokens, msg.src, p, pv, 1, false, msg.serialId);
-              pst := pst - 1;
-            else
-              Send(Tokens, msg.src, p, pv, 0, true, msg.serialId);
-              pot := false;
-              ps := B;
-            endif;
-          case GetM:
-            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
-            pst := 0;
-            pot := false;
-            ps := B;
-
-          case IncSerialNum:
-          
-          case BackupInv:
-
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-
-          case StartTokenRec:
-
-          case Tokens:
-            ReceiveTokens(p, msg);
-        endswitch;
-      case Mb:
-        switch msg.mtype:
-          case GetS:
-          
-          case GetM:
-
-          case IncSerialNum:
-          
-          case BackupInv:
-
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-            pbt := true;
-            ps := M;
-          case StartTokenRec:
-
-          case Tokens:
-        endswitch;
-      case M:
-        switch msg.mtype:
-          case GetS:
-            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
-            pst := 0;
-            pot := false;
-            ps := B;
-          case GetM:
-            Send(Tokens, msg.src, p, pv, pst, true, msg.serialId);
-            pst := 0;
-            pot := false;
-            ps := B;
-          case IncSerialNum:
-            
-          case BackupInv:
-            
-          case DestructionDone:
-
-          case ActivatePersistent:
-
-          case DeactivatePersistent:
-
-          case PingPersistent:
-
-          case AckO:
-
-          case AckBD:
-
-          case StartTokenRec:
-
-          case Tokens:
-        endswitch;          
-    endswitch;
-    
-    endalias;
     endalias;
 End;
 
