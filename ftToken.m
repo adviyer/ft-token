@@ -27,6 +27,7 @@ type
     SharerTokenCount: 0..(ProcCount-1);
     PerfMsgCount: 0..MaxPerfMsgs;
     SerialNumType: 0..MaxTokenSerialNum;
+    AckCount: 0..(ProcCount-1);
 
     MessageType: enum {
           GetS
@@ -57,23 +58,13 @@ type
 
     HomeState:
         Record
-            state: enum {
-                -- TBD: Fill this
-                -- TODO: Do we need a backup state? A potential optimization is getting rid of the MainMem backup state and having if no backup
-                -- /owner token exists, then MainMem must have the most recent copy of data
-                -- TODO: Is a recreating token state (R) necessary for MainMem?
-                I   -- MainMem does not have any tokens
-              , B   -- NOTE: Have this state for now
-              , S   -- MainMem has one or more sharer tokens
-              , Ob
-              , O   -- MainMem has the owner token and, potentially, other sharer tokens
-              , Mb
-              , M   -- MainMem has every token
-            };
             val: Value;
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
+            TrSAckCount: AckCount;
+            BInvAckCount: AckCount;
+            OwnerAck: boolean;
         End;
 
     ProcState:
@@ -82,12 +73,18 @@ type
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             hasBackupToken: boolean;
-            req: MessageType;   -- Each proc needs to keep track of what request it is currently waiting a response for so re-issued requests can happen
             curSerial: SerialNumType;
             curPersistentRequester: Proc;
             persistentTable: array [Proc] of boolean;
-            -- TODO: How should we add a persistent request table in Murphi?
-            -- TODO: We also need to add a serial number table per cache
+
+            -- The following fields are used for rulesets:
+            desiredState : enum {
+              INVALID,
+              SHARED,
+              MODIFIED
+            };
+            numPerfMsgs: PerfMsgCount;
+
         End;
 
 ----------------------------------------------------------------------
@@ -174,13 +171,16 @@ Begin
     then
       assert(!isundefined(msg.numSharerTokens));
       p.numSharerTokens := p.numSharerTokens + msg.numSharerTokens;
+      if !IsUndefined(msg.val)
+      then
+      val := msg.val;
+      endif;
 
       if msg.hasOwnerToken
       then
         assert(!isundefined(msg.val));
         assert(isundefined(p.hasOwnerToken));
         p.hasOwnerToken := true;
-        p.val := msg.val;
         BroadcastFaultMsg(AckO, msg.src, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
       endif;
     endif;
@@ -246,12 +246,34 @@ Begin
   return !isundefined(TrNet[n]);
 End;
 
+
+Function IsInvalid(n:Proc) : boolean;
+Begin
+  return Procs[n].numSharerTokens = 0 & !Procs[n].hasBackupToken & !Procs[n].hasOwnerToken
+End;
+
+
+Function IsShared(n:Proc) : boolean;
+Begin
+  return Procs[n].numSharerTokens > 0 | Procs[n].hasOwnerToken;
+End;
+
+-- Note: does not consider backup token
+Function IsModified(n:Proc) : boolean;
+Begin
+  return Procs[n].numSharerTokens = MaxSharerTokens & Procs[n].hasOwnerToken;
+End;
+
+
+
+
 Function IsTRMsg(msg:Message) : boolean;
 Begin
   return (msg.mtype = IncSerialNum |
           msg.mtype = BackupInv | 
           msg.mtype = DestructionDone | 
-          msg.mtype = StartTokenRec);
+          msg.mtype = StartTokenRec |
+          msg.mtype = IncSerialNumAck);
 End;
 
 Procedure HomeReceive(msg:Message);
@@ -265,32 +287,37 @@ Begin
     switch msg.mtype
       case GetS:    -- README: In TokenB, which FtTokenCMP is based on, procs in S ignore transient read reqs
       -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
-        if h.hasOwnerToken & h.hasBackupToken
+        if h.hasOwnerToken & h.hasBackupToken & (h.numSharerTokens = MaxNumSharers) -- State M
         then
           BroadcastFaultMsg(Tokens, msg.src, h, h.val, h.numSharerTokens, true, h.curSerial);
           h.hasOwnerToken := false;
           h.numSharerTokens := 0;
-        else
-          if h.numSharerTokens > 0
-          then
-            BroadcastFaultMsg(Tokens, msg.src, h, h.val, h.numSharerTokens, false, h.curSerial);
+        else if h.hasOwnerToken & (h.numSharerTokens > 0) -- State O/Ob/Mb with more than 1 sharer
+        then
+            BroadcastFaultMsg(Tokens, msg.src, h, h.val, 1, false, h.curSerial);
             h.numSharerTokens := 0;
-          endif;
+        else if h.hasOwnerToken & h.hasBackupToken -- State O; no sharers
+        then
+          BroadcastFaultMsg(Tokens, msg.src, h, h.val, 0, true, h.curSerial);
+          h.hasOwnerToken := false;
         endif;
 
       case GetM:
         SendAllTokens(msg.src, h);
 
-      case SetSerialNum:
-        h.curSerial := msg.serialId;
-        if h.hasOwnerToken then
-          SendTRMsg(IncSerialNumAck, MainMem, h, h.val);
-          h.numSharerTokens := 0;
-          h.hasOwnerToken := false;
+      case msg.mtype = IncSerialNum |
+          msg.mtype = BackupInv | 
+          msg.mtype = DestructionDone | 
+          msg.mtype = StartTokenRec
+
+      case StartTokenRec:
+        if h.curSerial = 3
+        then
+          h.curSerial := 0;
         else
-          SendTRMsg(IncSerialNumAck, MainMem, h, UNDEFINED);
-          h.numSharerTokens := 0;
+          h.curSerial := h.curSerial + 1;
         endif;
+        BroadcastFaultMsg()
       
       case BackupInv:
         if h.hasBackupToken
@@ -358,40 +385,34 @@ Begin
 
       case GetS:    -- README: In TokenB, which FtTokenCMP is based on, procs in S ignore transient read reqs
       -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
-        if p.hasOwnerToken & p.hasBackupToken
+        if p.hasOwnerToken & p.hasBackupToken & (p.numSharerTokens = MaxNumSharers) -- State M
         then
           BroadcastFaultMsg(Tokens, msg.src, p, p.val, p.numSharerTokens, true, p.curSerial);
           p.hasOwnerToken := false;
           p.numSharerTokens := 0;
-        else
-          if p.numSharerTokens > 0
-          then
-            BroadcastFaultMsg(Tokens, msg.src, p, p.val, p.numSharerTokens, false, p.curSerial);
+        else if p.hasOwnerToken & (p.numSharerTokens > 0) -- State O/Ob/Mb with more than 1 sharer
+        then
+            BroadcastFaultMsg(Tokens, msg.src, p, p.val, 1, false, p.curSerial);
             p.numSharerTokens := 0;
-          endif;
+        else if p.hasOwnerToken & p.hasBackupToken -- State O; no sharers
+        then
+          BroadcastFaultMsg(Tokens, msg.src, p, p.val, 0, true, p.curSerial);
+          p.hasOwnerToken := false;
         endif;
 
       case GetM:
-        SendAllTokens(msg.src, p);
+        SendAllTokens(msg.src, h);
 
       case SetSerialNum:
-        -- TODO: What are we using the serial numbers in our Proc Record for at the moment? Is it for bounded faults or does it
-        -- (contd.) symbolize the token serial numbers?
         p.curSerial := msg.serialId;
-        if p.hasOwnerToken then
+        if p.hasOwnerToken & !p.hasBackupToken -- State Ob/Mb
+        then
           SendTRMsg(IncSerialNumAck, MainMem, p, p.val);
           p.numSharerTokens := 0;
-          p.hasOwnerToken := false;
+          -- p.hasOwnerToken := false; (cannot delete owner token until you see BInv)
         else
           SendTRMsg(IncSerialNumAck, MainMem, p, UNDEFINED);
           p.numSharerTokens := 0;
-        endif;
-      
-      case BackupInv:
-        if p.hasBackupToken
-        then
-          p.hasBackupToken := false;
-          undefine p.val;
         endif;
 
       case DestructionDone:        
@@ -456,21 +477,106 @@ End;
 ----------------------------------------------------------------------
 
 -- Processor actions (affecting coherency)
-
 ruleset n: Proc Do
     alias p: Procs[n] do
 
     --==== Store ====--
     ruleset v: Value do
 
+      rule "store while modified"
+        (IsModified(p))
+      ==>
+        p.val := v;
+        LastWrite := v;
+      endrule;
         
     endruleset;
 
+    rule "store while invalid"
+      (p.desiredState = INVALID & IsInvalid(p))
+    ==>
+      p.numPerfMsgs := 0;
+      p.desiredState := MODIFIED;
+      assert(!IsEntry(p));
+    endrule;
+
+    rule "store while shared"
+      (p.desiredState = SHARED & IsShared(p))  
+    ==>
+      p.numPerfMsgs := 0;
+      p.desiredState := MODIFIED; 
+      assert(!IsEntry(p));
+      
+    endrule;
+
     --==== Load ====--
+    rule "load while invalid"
+      (p.desiredState = INVALID & IsInvalid(p))
+    ==>
+      p.numPerfMsgs := 0;
+      p.desiredState := SHARED;
+      assert(!IsEntry(p));
+    endrule;
 
     --==== Writeback ====--
 
+    rule "evict while shared"
+      (p.desiredState = SHARED & IsShared(p) & (!p.hasOwnerToken | p.hasBackupToken))  
+    ==>
+      p.numPerfMsgs := 0;
+      p.desiredState := INVALID; 
+      assert(!IsEntry(p));
+    endrule;
+
+    rule "evict while owned"
+      (p.desiredState = MODIFIED & IsModified(p) & p.hasBackupToken)
+    ==>
+      p.numPerfMsgs := 0;
+      p.desiredState := INVALID;
+      assert(!IsEntry(p));
+    endrule;
+
+    --==== Performance Messages ====--
+    rule "send GetS"
+      (!IsShared(p) & desiredState = SHARED & p.numPerfMsgs < MaxPerfMsgs)
+    ==>
+      BroadcastFaultMsg(GetS, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+      p.numPerfMsgs = p.numPerfMsgs + 1;
+      assert(!IsEntry(p));
+    endrule;
+
+    rule "send GetM"
+      (!IsModified(p) & desiredState = MODIFIED & p.numPerfMsgs < MaxPerfMsgs)
+    ==>
+      BroadcastFaultMsg(GetM, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+      p.numPerfMsgs =  p.numPerfMsgs + 1;
+      assert(!IsEntry(p));
+    endrule;
+
+
+    --==== Performance Messages ====--
+    rule "send persistent request for sharer"
+      (!IsShared(p) & desiredState = SHARED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(p))
+    ==>
+      PersistentTableActivate(p);
+      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+      assert(IsEntry(p));
+    endrule;
+
+    rule "send persistent request for modifier"
+      (!IsModified(p) & desiredState = MODIFIED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(p))
+    ==>
+      PersistentTableActivate(p);
+      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, p, UNDEFINED, UNDEFINED, UNDEFINED, UNDEFINED);
+      assert(IsEntry(p));
+    endrule;
+  
     endalias; -- p
+endruleset;
+
+ruleset n: Node do
+  
+
 endruleset;
 
 -- Message delivery rules per node

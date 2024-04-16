@@ -5,11 +5,47 @@
 - Finish home node state machine
     - U got this (Miah)
 
-- Load/store/evict rulesets
-    - Mustafa
+- Load/store/evict rulesets (Mustafa)
+    - Set requested state ()
 
 - Timeout rulesets
-    - Mustafa
+Timeouts:
+
+Persistent request timout:
+Condition:
+    - Desired state != cur state
+    - PerfMsgCount == MaxPerfMsgs
+    - PersistentRequest inactive
+Action:
+    - PersistentRequest active
+    - Send activate persistent request
+
+Lost token timeout:
+Condition:
+    - Desired state != cur state
+    - Persistent request active
+    - TRR inactive
+Action:
+    - TRR active
+    - Send token recreation request
+
+Lost data:
+    - Only has backup token
+    - !TRR active
+
+Lost backup deletion ack: (added conditions for space on network?)
+    - Has owner token but not backup token
+    - !TRR active
+
+Lost persistent deactivation:
+    - Has curPersistentRequester != self
+    
+
+
+
+
+
+
 
 - Ensuring that wrapped around token serial number does not exist
     - Use MultiSetRemovePred
