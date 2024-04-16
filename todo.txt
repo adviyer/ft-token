@@ -1,0 +1,19 @@
+- Expand TR network
+    - ??
+    - Miah
+
+- Finish home node state machine
+    - U got this (Miah)
+
+- Load/store/evict rulesets
+    - Mustafa
+
+- Timeout rulesets
+    - Mustafa
+
+- Ensuring that wrapped around token serial number does not exist
+    - Use MultiSetRemovePred
+    - Mustafa
+
+- Forward tokens on destruction done if not persistent requester
+    - Mustafa

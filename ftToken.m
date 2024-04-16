@@ -78,17 +78,6 @@ type
 
     ProcState:
         Record
-            -- Current state must be coherent with token counts
-            state: enum {   -- TODO: Discuss with group whether we are using states or not
-                  I
-                , R     -- Recreating tokens state (entered when a fault is detected and a token recreation process is requested)
-                , B
-                , S
-                , Ob
-                , O
-                , Mb
-                , M
-            };
             val: Value;
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
@@ -472,7 +461,6 @@ ruleset n: Proc Do
     alias p: Procs[n] do
 
     --==== Store ====--
-
     ruleset v: Value do
 
         
