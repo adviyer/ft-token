@@ -11,7 +11,7 @@
 - Timeout rulesets
 Timeouts:
 
-Persistent request timout:
+Persistent request timout: 
 Condition:
     - Desired state != cur state
     - PerfMsgCount == MaxPerfMsgs
@@ -22,7 +22,7 @@ Action:
 
 Lost token timeout:
 Condition:
-    - Desired state != cur state
+    - Desired state != cur state -> won't this be when owner ack or backup ack isn't received. Would desired state come into play?
     - Persistent request active
     - TRR inactive
 Action:
@@ -39,13 +39,8 @@ Lost backup deletion ack: (added conditions for space on network?)
 
 Lost persistent deactivation:
     - Has curPersistentRequester != self
-    
 
-
-
-
-
-
+For serial numbers, can we just nuke messages in the net with the 'new' serial id? - Advait 
 
 - Ensuring that wrapped around token serial number does not exist
     - Use MultiSetRemovePred
