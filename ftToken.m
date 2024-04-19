@@ -309,6 +309,24 @@ Begin
   endfor;
 End
 
+Procedure RecreateTokens();
+Begin
+  alias h : MainMem do
+    h.numSharerTokens := 0;
+    -- NOTE: We could, but shouldn't, delete or send out the owner token if we have it
+    if h.curSerial = 3
+    then
+      h.curSerial := 0;
+    else
+      h.curSerial := h.curSerial + 1;
+    endif;
+    -- TODO: add a condition where messages currently in network with "new"" serial number get removed
+    -- assumption that serial number will be large enough that serial numbers won't wrap around—should have triggered persistent/regen request
+    BroadcastFaultMsg(SetSerialNum, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, UNDEFINED, h.curSerial);
+    NukeAliasSerialTag();
+  endalias;
+End
+
 Procedure HomeReceive(msg:Message);
 Begin
  alias h : MainMem do
@@ -344,18 +362,7 @@ Begin
         endif;
 
       case StartTokenRec:
-        h.numSharerTokens := 0;
-        -- NOTE: We could, but shouldn't, delete or send out the owner token if we have it
-        if h.curSerial = 3
-        then
-          h.curSerial := 0;
-        else
-          h.curSerial := h.curSerial + 1;
-        endif;
-        -- TODO: add a condition where messages currently in network with "new"" serial number get removed
-        -- assumption that serial number will be large enough that serial numbers won't wrap around—should have triggered persistent/regen request
-        BroadcastFaultMsg(SetSerialNum, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, UNDEFINED, h.curSerial);
-        NukeAliasSerialTag();
+        RecreateTokens();
       
       case SetSerialNumAck:
         if msg.seriaId = h.curSerial
@@ -666,6 +673,13 @@ ruleset n: Proc Do
     ==> 
       BroadcastFaultMsg(StartTokenRec, p, h, UNDEFINED, UNDEFINED, UNDEFINED);
 
+    --==== Token Recreation Timeout ====--
+    
+    rule "token recreation timeout" 
+      (h.isRecreating)
+    ==> 
+      RecreateTokens();
+      
     endalias; -- h
     endalias; -- p
 endruleset;

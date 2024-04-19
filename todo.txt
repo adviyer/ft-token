@@ -48,3 +48,8 @@ For serial numbers, can we just nuke messages in the net with the 'new' serial i
 
 - Forward tokens on destruction done if not persistent requester
     - Mustafa
+
+TODO: add timeout for token recreation
+- is recreating, can issue timeout
+- also have to specify that when this happens, a TRS needs to be reissued for a new Serial Number
+ 
