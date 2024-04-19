@@ -169,14 +169,23 @@ Procedure SendTRMsg (
 );
 var msg: Message;
 Begin
-  assert(IsTRMsg(msg));
+    assert(IsTRMsg(msg));
 
-  msg.mtype   := mtype;
-  msg.dst     := dst;
-  msg.src     := src;
-  msg.val     := val;
+    -- Delete existing message with same serial ID
+    for n : Node do
+        alias trMsg : TrNet[n] do
+            if trMsg.serialId = msg.serialId then
+                undefine trMsg;
+            endif;
+        endalias;
+    endfor;
 
-  TrNet[dst] := msg;
+    msg.mtype   := mtype;
+    msg.dst     := dst;
+    msg.src     := src;
+    msg.val     := val;
+
+    TrNet[dst] := msg;
 End;
 
 Procedure ErrorUnhandledMsg(msg:Message; n:Node);
