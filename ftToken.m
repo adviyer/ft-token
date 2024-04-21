@@ -296,7 +296,12 @@ End;
 
 Function IsEntry(p: Proc): boolean;
 Begin
-  return Procs[p].persistentTable[p];
+  if (isundefined(Procs[p].persistentTable[p]))
+  then
+    return false;
+  else
+    return Procs[p].persistentTable[p];
+  endif;
 End;
 
 /*
@@ -884,19 +889,24 @@ endruleset;
 -- Message delivery rules per node
 ruleset n: Node do
 
-  alias faultChan : FaultNet[n] do
+
 
   -- Rule to delete or process message
   choose midx : FaultNet[n] do
+    alias faultChan : FaultNet[n] do
     alias msg : faultChan[midx] do
 
     rule "inject-fault"
+      (!isundefined(msg.mtype))
+      ==>
       -- TODO: do we need a bit to ensure forward progress?
       -- I dont think so since Murphi will collapse circular states
       MultiSetRemove(midx, faultChan);
     endrule;
 
     rule "process-message"
+    (!isundefined(msg.mtype))
+      ==>
       if IsMember(n, Home)
       then
         HomeReceive(msg);
@@ -908,10 +918,11 @@ ruleset n: Node do
     endrule;
 
     endalias; -- msg
+    endalias; -- faultChan
+
 
   endchoose; -- midx
 
-  endalias; -- faultChan
 
 endruleset;
 
@@ -927,6 +938,7 @@ startstate
         MainMem.hasBackupToken := true;
         MainMem.curSerial := 0;
         MainMem.val := v;
+        MainMem.isRecreating := false;
     endfor;
     LastWrite := MainMem.val;
     
@@ -948,7 +960,7 @@ startstate
     endfor;
 
     -- network initialization
-    undefine FaultNet;
+    
 endstartstate;
 
 ----------------------------------------------------------------------
