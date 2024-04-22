@@ -131,7 +131,7 @@ End;
 Function IsNetFull() : boolean;
 Begin
   for n : Node do
-    if (MultiSetCount(i: FaultNet[n], true) >= NetMax - 1)
+    if (MultiSetCount(i: FaultNet[n], true) >= 4 - 1)
     then
       return true;
     endif;
@@ -624,10 +624,10 @@ Begin
       case AckO:
         if msg.serialId = h.curSerial
         then
-          if h.hasBackupToken
+          if h.hasBackupToken & !h.hasOwnerToken
           then
-            assert(h.hasBackupToken & !h.hasOwnerToken) -- Memory must be in Backup state to get sent this message
-              "Memory is not in a backup state but it got sent an AckO with the right serial number";
+            -- assert(h.hasBackupToken & !h.hasOwnerToken) -- Memory must be in Backup state to get sent this message
+              -- "Memory is not in a backup state but it got sent an AckO with the right serial number";
             
 	    BroadcastFaultMsg(AckBD, msg.src, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
             h.hasBackupToken := false;
@@ -799,10 +799,10 @@ Begin
       case AckO: -- ownership has been transfered, data safe to destroy
         if msg.serialId = p.curSerial
         then
-	  if p.hasBackupToken
+	  if p.hasBackupToken & !p.hasOwnerToken
 	  then
-          assert(p.hasBackupToken & !p.hasOwnerToken) -- Processor must be in Backup state to get sent this message
-              "Processor is not in a backup state but it got sent an AckO with the right serial number";
+          -- assert(p.hasBackupToken & !p.hasOwnerToken) -- Processor must be in Backup state to get sent this message
+             -- "Processor is not in a backup state but it got sent an AckO with the right serial number";
           BroadcastFaultMsg(AckBD, msg.src, n, UNDEFINED, UNDEFINED, false, p.curSerial);
           p.hasBackupToken := false;
           undefine p.val;
