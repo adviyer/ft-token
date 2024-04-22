@@ -102,7 +102,7 @@
 
 /* the size of search queues as a percentage
    of the maximum number of states */
-#define gPercentActiveStates 0.10
+#define gPercentActiveStates 0.95
 
 // for use in tsprintf
 #define BUFFER_SIZE 1024

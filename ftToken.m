@@ -350,6 +350,18 @@ Begin
   endfor;
 End;
 
+/*
+Procedure NukeEverything();
+Begin
+  for n: Node do
+    MultiSetRemovePred(i: FaultNet[n], true);
+    Procs[n].hasOwnerToken := false;
+    Procs[n].hasBackupToken := false;
+    Procs[n].numSharerTokens := 0;
+  endfor;
+End;
+*/
+
 Procedure RecreateTokens();
 Begin
   alias h : MainMem do
@@ -366,6 +378,7 @@ Begin
     endif;
     -- TODO: add a condition where messages currently in network with "new"" serial number get removed
     -- assumption that serial number will be large enough that serial numbers won't wrap around—should have triggered persistent/regen request
+    -- NukeEverything();
     NukeAliasSerialTag(h.curSerial);
     BroadcastFaultMsg(SetSerialNum, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
   endalias;
