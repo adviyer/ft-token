@@ -373,10 +373,7 @@ Begin
   For n : Proc Do  
     if Procs[n].hasOwnerToken
     then
-      For iving "; put msg.mtype; put " at home -- ";
-    put "Owner: "; put h.hasOwnerToken; put " Backup: "; put h.hasBackupToken;
-    put " Sharers: "; put h.numSharerTokens; put "\n"; 
- Proc Do 
+      For i : Proc Do 
         if  (Procs[n].procId != Procs[i].procId & Procs[i].hasOwnerToken = true)
         then
           return true;
@@ -386,6 +383,7 @@ Begin
   endfor;
   return false;
 End;
+
 
 Function HasMultipleBackups() : Boolean;
 Begin 
@@ -403,13 +401,39 @@ Begin
   return false;
 End;
 
+Procedure PrintProcState(n:Proc);
+Begin
+  alias p : Procs[n] Do
+    put "Proc: "; put p.procId;
+    put " Owner - "; put p.hasOwnerToken; put " Backup - "; put p.hasBackupToken;
+    put " Sharers - "; put p.numSharerTokens; put "\n"; 
+  endalias;
+End;
+
+Procedure PrintHomeState();
+Begin
+  alias h : MainMem Do
+    put "Home:";
+    put " Owner - "; put h.hasOwnerToken; put " Backup - "; put h.hasBackupToken;
+    put " Sharers - "; put h.numSharerTokens; put "\n"; 
+  endalias;
+End;
+
+Procedure PrintAllState();
+Begin
+  PrintHomeState();
+  For n : Proc Do  
+    PrintProcState(n);
+  endfor;
+
+End;
+
 Procedure HomeReceive(msg:Message);
 Begin
  alias h : MainMem do
     -- Debug output may be helpful:
-    put "receiving "; put msg.mtype; put " at home -- ";
-    put "Owner: "; put h.hasOwnerToken; put " Backup: "; put h.hasBackupToken;
-    put " Sharers: "; put h.numSharerTokens; put "\n"; 
+    put "Receiving "; put msg.mtype; put " at home\n";
+    PrintAllState();
 
     -- default to 'processing' message.  set to false otherwise
     switch msg.mtype
@@ -641,8 +665,9 @@ Begin
 
     alias p: Procs[n] do
    
-    put "Receiving "; put msg.mtype; put " at proc "; put n; put "\n";
-    put "Owner: "; put p.hasOwnerToken; put " Backup: "; put p.hasBackupToken; put " Sharers: "; put p.numSharerTokens; put "\n";
+    put "Receiving "; put msg.mtype; put " at proc "; put p.procId; put "\n";
+    PrintAllState();
+    
 
     -- Note: (dst == undefined) -> broadcast
     -- If we are not the intended dst, do nothing
