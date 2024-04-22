@@ -730,6 +730,8 @@ Begin
           else -- State Mb/Ob
             BroadcastFaultMsg(SetSerialNumAck, HomeType, n, p.val, UNDEFINED, false, p.curSerial); -- Cannot send Owner token
             p.numSharerTokens := 0; -- Proc will go to state Ob
+	    p.hasOwnerToken := false; -- BAD
+            undefine p.val;
           endif;
         else -- State S/B/I
           BroadcastFaultMsg(SetSerialNumAck, HomeType, n, UNDEFINED, UNDEFINED, false, p.curSerial);
@@ -1017,6 +1019,7 @@ endruleset;
 -- Startstate
 ----------------------------------------------------------------------
 startstate
+
     -- TBD: Update this
     For v: Value do
         -- home node initialization
