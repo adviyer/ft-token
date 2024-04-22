@@ -128,9 +128,16 @@ Begin
           msg.mtype = SetSerialNumAck);
 End;
 
-Function IsNetFull(n: Node) : boolean;
+Function IsNetFull() : boolean;
 Begin
-  return (MultiSetCount(i: FaultNet[n], true) >= NetMax - 1);
+  for n : Node do
+    if (MultiSetCount(i: FaultNet[n], true) >= NetMax - 1)
+    then
+      return true;
+    endif;
+  end;
+ 
+  return false;
 End;
 
 Procedure BroadcastFaultMsg (
@@ -366,7 +373,10 @@ Begin
   For n : Proc Do  
     if Procs[n].hasOwnerToken
     then
-      For i : Proc Do 
+      For iving "; put msg.mtype; put " at home -- ";
+    put "Owner: "; put h.hasOwnerToken; put " Backup: "; put h.hasBackupToken;
+    put " Sharers: "; put h.numSharerTokens; put "\n"; 
+ Proc Do 
         if  (Procs[n].procId != Procs[i].procId & Procs[i].hasOwnerToken = true)
         then
           return true;
@@ -397,8 +407,9 @@ Procedure HomeReceive(msg:Message);
 Begin
  alias h : MainMem do
     -- Debug output may be helpful:
---  put "Receiving "; put msg.mtype; put " on VC"; put msg.vc; 
---  put " at home -- "; put MainMem.state;
+    put "receiving "; put msg.mtype; put " at home -- ";
+    put "Owner: "; put h.hasOwnerToken; put " Backup: "; put h.hasBackupToken;
+    put " Sharers: "; put h.numSharerTokens; put "\n"; 
 
     -- default to 'processing' message.  set to false otherwise
     switch msg.mtype
@@ -629,8 +640,9 @@ Procedure ProcReceive(msg: Message; n: Proc);
 Begin
 
     alias p: Procs[n] do
-
-    --put "Receiving "; put msg.mtype; put " at proc "; put p; put "\n";
+   
+    put "Receiving "; put msg.mtype; put " at proc "; put n; put "\n";
+    put "Owner: "; put p.hasOwnerToken; put " Backup: "; put p.hasBackupToken; put " Sharers: "; put p.numSharerTokens; put "\n";
 
     -- Note: (dst == undefined) -> broadcast
     -- If we are not the intended dst, do nothing
@@ -782,7 +794,7 @@ ruleset n: Proc Do
     ruleset v: Value do
 
       rule "store while modified"
-        (IsModified(n) & !IsNetFull(n))
+        (IsModified(n))
       ==>
         p.val := v;
         LastWrite := v;
@@ -791,14 +803,14 @@ ruleset n: Proc Do
     endruleset;
 
     rule "store while invalid"
-      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n) & !IsEntry(n))
+      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull() & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := MODIFIED;
     endrule;
 
     rule "store while shared"
-      (p.desiredState = SHARED & IsShared(n) & !IsNetFull(n) & !IsEntry(n))
+      (p.desiredState = SHARED & IsShared(n) & !IsNetFull() & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := MODIFIED; 
@@ -807,7 +819,7 @@ ruleset n: Proc Do
 
     --==== Load ====--
     rule "load while invalid"
-      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n) & !IsEntry(n))
+      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull() & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := SHARED;
@@ -816,14 +828,14 @@ ruleset n: Proc Do
     --==== Writeback ====--
 
     rule "evict while shared"
-      (p.desiredState = SHARED & IsShared(n) & (!p.hasOwnerToken | p.hasBackupToken) & !IsNetFull(n) & !IsEntry(n))  
+      (p.desiredState = SHARED & IsShared(n) & (!p.hasOwnerToken | p.hasBackupToken) & !IsNetFull() & !IsEntry(n))  
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := INVALID; 
     endrule;
 
     rule "evict while owned"
-      (p.desiredState = MODIFIED & IsModified(n) & p.hasBackupToken & !IsNetFull(n) & !IsEntry(n))
+      (p.desiredState = MODIFIED & IsModified(n) & p.hasBackupToken & !IsNetFull() & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := INVALID;
@@ -831,7 +843,7 @@ ruleset n: Proc Do
 
     --==== Performance Messages ====--
     rule "send GetS"
-      (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull(n))
+      (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       BroadcastFaultMsg(GetS, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
       p.numPerfMsgs := p.numPerfMsgs + 1;
@@ -839,7 +851,7 @@ ruleset n: Proc Do
     endrule;
 
     rule "send GetM"
-      (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull(n))
+      (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       BroadcastFaultMsg(GetM, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
       p.numPerfMsgs := p.numPerfMsgs + 1;
@@ -848,7 +860,7 @@ ruleset n: Proc Do
 
     --==== Performance Messages ====--
     rule "send persistent request for sharer"
-      (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull(n))
+      (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       PersistentTableActivate(n, n);
       BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
@@ -856,7 +868,7 @@ ruleset n: Proc Do
     endrule;
 
     rule "send persistent request for modifier"
-      (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull(n))
+      (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       PersistentTableActivate(n, n);
       BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
@@ -866,13 +878,13 @@ ruleset n: Proc Do
     --==== Lost Token Timeouts ===--
 
     rule "lost backup deletion acknowledgement" -- TODO: do we need to check for whether token is recreating?
-      (IsModified(n) & p.hasOwnerToken & !p.hasBackupToken & !h.isRecreating  & !IsNetFull(n) & !IsNetFull(HomeType))
+      (IsModified(n) & p.hasOwnerToken & !p.hasBackupToken & !h.isRecreating  & !IsNetFull())
     ==> 
       BroadcastFaultMsg(StartTokenRec, n, HomeType, UNDEFINED, UNDEFINED, false, UNDEFINED);
     endrule;
 
     rule "lost ownership acknowledgement" 
-      (!IsModified(n) & p.hasBackupToken & !h.isRecreating  & !IsNetFull(n) & !IsNetFull(HomeType))
+      (!IsModified(n) & p.hasBackupToken & !h.isRecreating  & !IsNetFull())
     ==> 
       BroadcastFaultMsg(StartTokenRec, n, HomeType, UNDEFINED, UNDEFINED, false, UNDEFINED);
     endrule;
@@ -880,7 +892,7 @@ ruleset n: Proc Do
     --==== Token Recreation Timeout ====--
     
     rule "token recreation timeout" 
-      (h.isRecreating & !IsNetFull(HomeType))
+      (h.isRecreating & !IsNetFull())
     ==> 
       RecreateTokens();
     endrule;
