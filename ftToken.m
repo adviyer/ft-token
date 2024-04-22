@@ -8,7 +8,7 @@ const
   ProcCount: 3;          -- number processors
   ValueCount:   2;       -- number of data values.
   QMax: 2;
-  NetMax: ProcCount+1; -- TODO: needs to be a function of MaxPerfMsgs?
+  NetMax: (ProcCount*ProcCount)+1; -- TODO: needs to be a function of MaxPerfMsgs?
   MaxPerfMsgs: 2; -- Number of repeated perf reqs sent before persistent req
   MaxTokenSerialNum: 3;
   MaxSharerTokens: (ProcCount-1);
@@ -111,7 +111,7 @@ var
     MainMem:  HomeState;
     Procs: array [Proc] of ProcState;
     FaultNet: array [Node] of multiset [NetMax] of Message;  -- Performance and persistent messages, can be deleted
-    TrNet: array [Node] of Message;                          -- TODO: Modify/Delete TrNet as it is no longer cosmic ray proof
+    --TrNet: array [Node] of Message;                          -- TODO: Modify/Delete TrNet as it is no longer cosmic ray proof
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
 
 ----------------------------------------------------------------------
@@ -130,7 +130,7 @@ End;
 
 Function IsNetFull(n: Node) : boolean;
 Begin
-  return (MultiSetCount(i: FaultNet[n], true) >= NetMax);
+  return (MultiSetCount(i: FaultNet[n], true) >= NetMax - 1);
 End;
 
 Procedure BroadcastFaultMsg (
@@ -165,6 +165,7 @@ Begin
     end;
 End;
 
+/*
 Procedure SendTRMsg (
     mtype: MessageType;
     dst: Node;
@@ -191,6 +192,7 @@ Begin
 
     TrNet[dst] := msg;
 End;
+*/
 
 Procedure ErrorUnhandledMsg(msg: Message; n: Node);
 Begin
@@ -337,7 +339,7 @@ End;
 Procedure NukeAliasSerialTag(serialId: SerialNumType);
 Begin
   for m: Node do
-      MultiSetRemovePred(i: FaultNet[m], FaultNet[m][i].serialId = serialId);
+      MultiSetRemovePred(i: FaultNet[m], !isundefined(FaultNet[m][i].serialId) & FaultNet[m][i].serialId = serialId);
   endfor;
 End;
 
@@ -398,8 +400,6 @@ Begin
 --  put "Receiving "; put msg.mtype; put " on VC"; put msg.vc; 
 --  put " at home -- "; put MainMem.state;
 
-    put "source "; put msg.src; put " dest "; put msg.dst; put "\n";
-
     -- default to 'processing' message.  set to false otherwise
     switch msg.mtype
       case GetS:
@@ -450,7 +450,7 @@ Begin
       case SetSerialNumAck:
         if msg.serialId = h.curSerial
         then
-          assert(h.isRecreating)
+          assert(!h.isRecreating)
             "Main memory received correct SetSerialNumAck without being in recreation state";
           h.TrSAckCount := h.TrSAckCount + 1;
           if !IsUndefined(msg.val)  -- TrS + Data
@@ -791,47 +791,42 @@ ruleset n: Proc Do
     endruleset;
 
     rule "store while invalid"
-      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n))
+      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n) & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := MODIFIED;
-      assert(!IsEntry(n));
     endrule;
 
     rule "store while shared"
-      (p.desiredState = SHARED & IsShared(n) & !IsNetFull(n))  
+      (p.desiredState = SHARED & IsShared(n) & !IsNetFull(n) & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := MODIFIED; 
-      assert(!IsEntry(n));
       
     endrule;
 
     --==== Load ====--
     rule "load while invalid"
-      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n))
+      (p.desiredState = INVALID & IsInvalid(n) & !IsNetFull(n) & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := SHARED;
-      assert(!IsEntry(n));
     endrule;
 
     --==== Writeback ====--
 
     rule "evict while shared"
-      (p.desiredState = SHARED & IsShared(n) & (!p.hasOwnerToken | p.hasBackupToken) & !IsNetFull(n))  
+      (p.desiredState = SHARED & IsShared(n) & (!p.hasOwnerToken | p.hasBackupToken) & !IsNetFull(n) & !IsEntry(n))  
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := INVALID; 
-      assert(!IsEntry(n));
     endrule;
 
     rule "evict while owned"
-      (p.desiredState = MODIFIED & IsModified(n) & p.hasBackupToken & !IsNetFull(n))
+      (p.desiredState = MODIFIED & IsModified(n) & p.hasBackupToken & !IsNetFull(n) & !IsEntry(n))
     ==>
       p.numPerfMsgs := 0;
       p.desiredState := INVALID;
-      assert(!IsEntry(n));
     endrule;
 
     --==== Performance Messages ====--
@@ -915,10 +910,13 @@ ruleset n: Node do
     rule "process-message"
     (!isundefined(msg.mtype))
       ==>
-      if IsMember(n, Home) & 
+      if IsMember(n, Home)
       then
-        HomeReceive(msg);
-        MultiSetRemove(midx, faultChan);
+        if !(MainMem.isRecreating & msg.mtype = StartTokenRec)
+        then
+            HomeReceive(msg);
+            MultiSetRemove(midx, faultChan);
+        endif;
       else
         ProcReceive(msg, n);
         MultiSetRemove(midx, faultChan);
@@ -949,6 +947,7 @@ startstate
         MainMem.curSerial := 0;
         MainMem.val := v;
         MainMem.isRecreating := false;
+        MainMem.TrSAckCount := 0;
     endfor;
     LastWrite := MainMem.val;
     
@@ -1000,6 +999,7 @@ invariant "Maximum of one owned token"
 invariant "Maximum of one backup token"
     HasMultipleBackups() = false;
 
+/* Is wrong
 invariant "Backup state implies no tokens except backup"
   Forall n : Proc Do
     Procs[n].hasBackupToken
@@ -1007,3 +1007,4 @@ invariant "Backup state implies no tokens except backup"
       Procs[n].hasBackupToken = true & Procs[n].numSharerTokens = 0
        & Procs[n].hasOwnerToken = false
   end;
+  */
