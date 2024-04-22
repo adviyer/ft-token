@@ -295,13 +295,13 @@ Begin
     BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, true, p.curSerial);
     p.numSharerTokens := 0;
     p.hasOwnerToken := false;
-  elsif p.hasOwnerToken -- State Mb/Ob
+  elsif p.hasOwnerToken & p.numSharerTokens > 0 -- State Mb/Ob
   then
-    BroadcastFaultMsg(Tokens, dst, src, UNDEFINED, p.numSharerTokens, false, p.curSerial);
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial);
     p.numSharerTokens := 0;
   elsif p.numSharerTokens > 0 -- State S
   then
-    BroadcastFaultMsg(Tokens, dst, src, UNDEFINED, p.numSharerTokens, false, p.curSerial);
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial);
     p.numSharerTokens := 0;
     undefine p.val;
   endif;
@@ -432,8 +432,8 @@ Procedure HomeReceive(msg:Message);
 Begin
  alias h : MainMem do
     -- Debug output may be helpful:
-    put "Receiving "; put msg.mtype; put " at home\n";
-    PrintAllState();
+
+    
 
     -- default to 'processing' message.  set to false otherwise
     switch msg.mtype
@@ -665,13 +665,12 @@ Begin
 
     alias p: Procs[n] do
    
-    put "Receiving "; put msg.mtype; put " at proc "; put p.procId; put "\n";
-    PrintAllState();
+    -- put "Receiving "; put msg.mtype; put " at proc "; put p.procId; put "\n";
     
 
     -- Note: (dst == undefined) -> broadcast
     -- If we are not the intended dst, do nothing
-    if !IsUndefined(msg.dst) & msg.dst != n -- TODO: oops I should've just did this solution for HomeNode
+    if (!IsUndefined(msg.dst) & msg.dst != n) | msg.src = n
     then
       return;
     endif;
@@ -947,6 +946,7 @@ ruleset n: Node do
     rule "process-message"
     (!isundefined(msg.mtype))
       ==>
+     -- PrintAllState();
       if IsMember(n, Home)
       then
         if !(MainMem.isRecreating & msg.mtype = StartTokenRec)
