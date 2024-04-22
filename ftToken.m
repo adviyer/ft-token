@@ -1047,71 +1047,81 @@ endruleset;
 ----------------------------------------------------------------------
 startstate
 
+  procId := 0;
+
+  for n: Node do
+    
+
+    if IsMember(n, HomeType)
+    then
+
+      MainMem.val := UNDEFINED;
+      MainMem.numSharerTokens := 0;
+      MainMem.hasOwnerToken := false;
+      MainMem.hasBackupToken := false;
+      MainMem.curSerial := 1;
+      MainMem.curPersistentRequester := 0;
+      MainMem.persistentTable[0] := true;
+      MainMem.persistentTable[1] := false;
+      MainMem.isRecreating := true;
+      MainMem.TrSAckCount := 1;
+      MainMem.BInvAckCount := 0;
+      MainMem.OwnerAck := false;
+
+    else
+      Procs[n].procId := procId;
+
+      if Procs[n].procId = 0
+      then
+        Procs[n].hasOwnerToken := true;
+        Procs[n].hasBackupToken := false;
+        Procs[n].numSharerTokens := 1;
+        Procs[n].desiredState := MODIFIED;
+        Procs[n].curSerial := 0;
+        Procs[n].numPerfMsgs := 0;
+        Procs[n].val := 1;
+        Procs[n].persistentTable[0] := true;
+        Procs[n].persistentTable[1] := false;
+        AddMsg(SetSerialNum, n, HomeType, UNDEFINED, 0, false, 1);
+      else
+        Procs[n].hasOwnerToken := false;
+        Procs[n].hasBackupToken := true;
+        Procs[n].numSharerTokens := 0;
+        Procs[n].desiredState := INVALID;
+        Procs[n].curSerial := 1;
+        Procs[n].numPerfMsgs := 0;
+        Procs[n].val := 0;
+        Procs[n].persistentTable[0] := true;
+        Procs[n].persistentTable[1] := false;
+      endif;
+  
+      procId := procId + 1;
+
+    endif
+
+  endfor;
 
 
-  -- Proc 0 (In Mb)
-  Procs[0].procId := 0;
-  Procs[0].hasOwnerToken := true;
-  Procs[0].hasBackupToken := false;
-  Procs[0].numSharerTokens := 1;
-  Procs[0].desiredState := MODIFIED;
-  Procs[0].curSerial := 0;
-  Procs[0].numPerfMsgs := 0;
-  Procs[0].val := 1;
-  Procs[0].curPersistentRequester = 0;
-  Procs[0].persistentTable[0] := true;
-  Procs[0].persistentTable[1] := false;
+  for n : Node do
 
+    if !IsMember(n, HomeType) & Procs[n].procId = 0
 
-  -- Proc 1 (in B)
-  Procs[1].procId := 0;
-  Procs[1].hasOwnerToken := false;
-  Procs[1].hasBackupToken := true;
-  Procs[1].numSharerTokens := 0;
-  Procs[1].desiredState := INVALID;
-  Procs[1].curSerial := 1;
-  Procs[1].numPerfMsgs := 0;
-  Procs[1].val := 0;
-  Procs[1].curPersistentRequester = 0;
-  Procs[1].persistentTable[0] := true;
-  Procs[1].persistentTable[1] := false;
+      for i : Node do
+        if IsMember(i, HomeType)
+        then
+          MainMem.curPersistentRequester = Procs[n];
+          MainMem.tokenRecRequester = Procs[n];
+        else
+          Procs[i].curPersistentRequester = Procs[n];
+        endif;
 
+      endfor;
 
-  -- Main memory
-  MainMem.val := UNDEFINED;
-  MainMem.numSharerTokens := 0;
-  MainMem.hasOwnerToken := false;
-  MainMem.hasBackupToken := false;
-  MainMem.curSerial := 1;
-  MainMem.curPersistentRequester := 0;
-  MainMem.persistentTable[0] := true;
-  MainMem.persistentTable[1] := false;
-  MainMem.isRecreating := true;
-  MainMem.TrSAckCount := 1;
-  MainMem.BInvAckCount := 0;
-  MainMem.OwnerAck := false;
-  MainMem.tokenRecRequester := 0;
+    endif;
 
-  -- network initialization:
-
-  -- Proc 0
-  AddMsg(SetSerialNum, 0, HomeType, UNDEFINED, 0, false, 1);
-
-  -- Proc 1
-
-  -- Home
+  endfor;
   
 endstartstate;
-
-AddMsg (
-    mtype: MessageType;
-    dst: Node;
-    src: Node;
-    val: Value;
-    numSharerTokens: SharerTokenCount;
-    hasOwnerToken: boolean;
-    serialId: SerialNumType;
-);
 
 ----------------------------------------------------------------------
 -- Invariants
