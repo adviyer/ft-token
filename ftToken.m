@@ -172,6 +172,33 @@ Begin
     end;
 End;
 
+
+Procedure AddMsg (
+    mtype: MessageType;
+    dst: Node;
+    src: Node;
+    val: Value;
+    numSharerTokens: SharerTokenCount;
+    hasOwnerToken: boolean;
+    serialId: SerialNumType;
+);
+var msg: Message;
+Begin
+    assert(hasOwnerToken -> !isundefined(val)) "Data Transfer Rule violated";
+    
+    msg.mtype           := mtype;
+    msg.dst             := dst;
+    msg.src             := src;
+    msg.val             := val;
+    msg.numSharerTokens := numSharerTokens;
+    msg.hasOwnerToken   := hasOwnerToken;
+    msg.serialId        := serialId;
+
+    -- Iterate through each node's multiset in faultnet and add the message
+    MultiSetAdd(msg, FaultNet[dst]);
+
+End;
+
 /*
 Procedure SendTRMsg (
     mtype: MessageType;
@@ -1020,41 +1047,71 @@ endruleset;
 ----------------------------------------------------------------------
 startstate
 
-    -- TBD: Update this
-    For v: Value do
-        -- home node initialization
-        MainMem.numSharerTokens := MaxSharerTokens;
-        MainMem.hasOwnerToken := true;
-        MainMem.hasBackupToken := true;
-        MainMem.curSerial := 0;
-        MainMem.val := v;
-        MainMem.isRecreating := false;
-        MainMem.TrSAckCount := 0;
-        MainMem.OwnerAck := false;
-        MainMem.BInvAckCount := 0;
-    endfor;
-    LastWrite := MainMem.val;
-    
-    -- processor initialization
-    procId := 0;
-    for i: Proc do
 
-        Procs[i].procId := procId;
-        Procs[i].hasOwnerToken := false;
-        Procs[i].hasBackupToken := false;
-        Procs[i].numSharerTokens := 0;
-        Procs[i].desiredState := INVALID;
-        Procs[i].curSerial := 0;
-        Procs[i].numPerfMsgs := 0;
 
-        procId := procId + 1;
-        undefine Procs[i].val;
+  -- Proc 0 (In Mb)
+  Procs[0].procId := 0;
+  Procs[0].hasOwnerToken := true;
+  Procs[0].hasBackupToken := false;
+  Procs[0].numSharerTokens := 1;
+  Procs[0].desiredState := MODIFIED;
+  Procs[0].curSerial := 0;
+  Procs[0].numPerfMsgs := 0;
+  Procs[0].val := 1;
+  Procs[0].curPersistentRequester = 0;
+  Procs[0].persistentTable[0] := true;
+  Procs[0].persistentTable[1] := false;
 
-    endfor;
 
-    -- network initialization
-    
+  -- Proc 1 (in B)
+  Procs[1].procId := 0;
+  Procs[1].hasOwnerToken := false;
+  Procs[1].hasBackupToken := true;
+  Procs[1].numSharerTokens := 0;
+  Procs[1].desiredState := INVALID;
+  Procs[1].curSerial := 1;
+  Procs[1].numPerfMsgs := 0;
+  Procs[1].val := 0;
+  Procs[1].curPersistentRequester = 0;
+  Procs[1].persistentTable[0] := true;
+  Procs[1].persistentTable[1] := false;
+
+
+  -- Main memory
+  MainMem.val := UNDEFINED;
+  MainMem.numSharerTokens := 0;
+  MainMem.hasOwnerToken := false;
+  MainMem.hasBackupToken := false;
+  MainMem.curSerial := 1;
+  MainMem.curPersistentRequester := 0;
+  MainMem.persistentTable[0] := true;
+  MainMem.persistentTable[1] := false;
+  MainMem.isRecreating := true;
+  MainMem.TrSAckCount := 1;
+  MainMem.BInvAckCount := 0;
+  MainMem.OwnerAck := false;
+  MainMem.tokenRecRequester := 0;
+
+  -- network initialization:
+
+  -- Proc 0
+  AddMsg(SetSerialNum, 0, HomeType, UNDEFINED, 0, false, 1);
+
+  -- Proc 1
+
+  -- Home
+  
 endstartstate;
+
+AddMsg (
+    mtype: MessageType;
+    dst: Node;
+    src: Node;
+    val: Value;
+    numSharerTokens: SharerTokenCount;
+    hasOwnerToken: boolean;
+    serialId: SerialNumType;
+);
 
 ----------------------------------------------------------------------
 -- Invariants
