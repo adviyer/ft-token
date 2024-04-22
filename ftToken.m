@@ -7,14 +7,12 @@
 const
   ProcCount: 2;          -- number processors
   ValueCount:   2;       -- number of data values.
-  QMax: 2;
-  NetMax: (9)+1; -- TODO: needs to be a function of MaxPerfMsgs?
+  NetMax: 10; -- TODO: needs to be a function of MaxPerfMsgs?
   MaxPerfMsgs: 0; -- Number of repeated perf reqs sent before persistent req
   MaxTokenSerialNum: 1;
   MaxSharerTokens: (ProcCount-1);
   MaxFaultsPerTransaction: 3;
   MaxTimeoutAmount: 3;
-  MaxTransactionNum: 10;
   
 ----------------------------------------------------------------------
 -- Types
@@ -88,6 +86,7 @@ type
             BInvAckCount: AckCount;
             OwnerAck: boolean;
             tokenRecRequester: Node;
+	    numDeactivateTimeout: TimeoutCount;
             -- tokenFaultsInjected: array [Proc] of FaultCount;
             -- tokenTimeoutAmount: array [Proc] of TimeoutCount;
             -- persistentFaultTable: array [proc] of FaultCount;
@@ -108,8 +107,8 @@ type
             -- tokenTimeoutAmount: array [Proc] of TimeoutCount;
             -- persistentFaultTable: array [proc] of FaultCount;
             -- persistentTimeoutTable: array [proc] of TimeoutCount;
-
             -- The following fields are used for rulesets:
+            numDeactivateTimeout: TimeoutCount;
             desiredState : enum {
               INVALID,
               SHARED,
@@ -130,8 +129,6 @@ var
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
     tokenFaultsInjected: array [Proc] of FaultCount;
     tokenTimeoutAmount: array [Proc] of TimeoutCount;
-    persistentFaultTable: array [proc] of FaultCount;
-    persistentTimeoutTable: array [proc] of TimeoutCount;
 
 ----------------------------------------------------------------------
 -- Procedures
@@ -151,13 +148,13 @@ End;
 Function IsNetFull() : boolean;
 Begin
   for n : Node do
-    if (MultiSetCount(i: FaultNet[n], true) >= 2 - 1)
+    if (MultiSetCount(i: FaultNet[n], true) >= 1)
     then
       return true;
     endif;
   end;
  
-  return false;
+return false;
 End;
 
 Procedure BroadcastFaultMsg (
@@ -184,12 +181,17 @@ Begin
     msg.numSharerTokens := numSharerTokens;
     msg.hasOwnerToken   := hasOwnerToken;
     msg.serialId        := serialId;
-
+    msg.initiator	:= initiator;
     -- Iterate through each node's multiset in faultnet and add the message
     
     for n : Node do
       assert(MultiSetCount(i: FaultNet[n], true) < NetMax) "Too many messages";
-      MultiSetAdd(msg, FaultNet[n]);
+      if IsUndefined(msg.dst)
+      then
+        MultiSetAdd(msg, FaultNet[n]);
+      elsif msg.dst = n then
+        MultiSetAdd(msg, FaultNet[n]);
+      endif;
     end;
 End;
 
@@ -278,6 +280,7 @@ Begin
   if isundefined(recv.curPersistentRequester)
       | (req.procId < Procs[recv.curPersistentRequester].procId) then
     recv.curPersistentRequester := rqstr;
+    recv.numDeactivateTimeout := 0;
   end;
 
   -- Resetting number of performance messages
@@ -517,7 +520,7 @@ Begin
 
       case StartTokenRec:
         h.tokenRecRequester := msg.src;
-	      RecreateTokens();
+	RecreateTokens();
       
       case SetSerialNumAck:
         if msg.serialId = h.curSerial
@@ -533,13 +536,17 @@ Begin
                                 -- (contd.) receive TrSAck + Data the 2nd time around
             h.val := msg.val; -- Copy data to memory
           endif;
+         
           if h.TrSAckCount = ProcCount -- Every processor set new serial number
           then
+         
             if h.hasOwnerToken  -- TODO: Add invariant that h.hasOwnerToken & h.OwnerAck are never both true
             then
-              if h.hasBackupToken -- Memory has every token it needs to recreate
+            
+             if h.hasBackupToken -- Memory has every token it needs to recreate
               then
-                if h.tokenRecRequester = HomeType -- Initiator of token recreation was memory
+            
+	        if h.tokenRecRequester = HomeType -- Initiator of token recreation was memory
                 then
                   h.numSharerTokens := MaxSharerTokens;
                   undefine h.tokenRecRequester;
@@ -552,12 +559,15 @@ Begin
                   undefine h.tokenRecRequester;
                   h.isRecreating := false;
                 endif;
-              else -- Memory has owner but not backup (Memory was in state Mb/Ob before the TR process)
-                BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);
-              endif;
-            elsif h.OwnerAck  -- Memory did not have the ownership token before the TR process
+              
+	     else -- Memory has owner but not backup (Memory was in state Mb/Ob before the TR process)
+               BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);
+             endif;
+            
+	    elsif h.OwnerAck  -- Memory did not have the ownership token before the TR process
             then
               BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);  -- TODO: Can memory see this request and does it matter?
+            
             else  -- Memory did not receive data from any processor (even after full TR process)
               if h.tokenRecRequester = HomeType -- Memory had the only true backup copy
               then
@@ -603,6 +613,7 @@ Begin
         if isundefined(h.curPersistentRequester)
             | (Procs[msg.src].procId < Procs[h.curPersistentRequester].procId) then
           h.curPersistentRequester := msg.src;
+	  h.numDeactivateTimeout := 0;
         end;
         -- TODO: Add invariant that memory can never be the persistent requester
         if !h.isRecreating -- If memory is in recreating process, do not send tokens
@@ -626,6 +637,7 @@ Begin
 
       case DeactivatePersistent:
         h.persistentTable[msg.src] := false;
+	h.numDeactivateTimeout := 0;
         if msg.src = h.curPersistentRequester
         then
           undefine h.curPersistentRequester;
@@ -772,7 +784,8 @@ Begin
 
       case DestructionDone:
         if msg.serialId = p.curSerial then
-          tokenFaultsInjected[msg.initiator] := 0;
+          Assert(!isundefined(msg.initiator));
+	  tokenFaultsInjected[msg.initiator] := 0;
           tokenTimeoutAmount[msg.initiator] := 0;
           assert(!(p.numSharerTokens > 0 | p.hasOwnerToken))
             "Processor received TrDone while it has non-backup tokens";
@@ -812,6 +825,7 @@ Begin
 
       case DeactivatePersistent:
         PersistentTableDeactivate(n, msg.src);
+        p.numDeactivateTimeout := 0;
 
       case PingPersistent: -- 
         if !IsEntry(n) then -- not already in persistent table
@@ -837,6 +851,12 @@ Begin
           assert(!p.hasBackupToken & p.hasOwnerToken) -- Processor must be in state Mb/Ob
             "Processor got sent an AckBD with the right serial number and destination but wasn't in blocked state";
           p.hasBackupToken := true;
+
+          if IsEntry(n) & p.hasBackupToken & p.hasOwnerToken & p.numSharerTokens = MaxSharerTokens
+	  then
+            BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, msg.serialId, UNDEFINED);
+	    PersistentTableDeactivate(n, n);
+          endif;
         endif;
 
       case Tokens:
@@ -845,9 +865,18 @@ Begin
           if !isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId
           then
             -- Forward received tokens to persistent requester (that's not self)
+            if !IsNetFull() then
             BroadcastFaultMsg(Tokens, p.curPersistentRequester, n, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId, p.curPersistentRequester);
-          else
+            endif;
+	  else
             ReceiveTokens(n, msg);
+
+ 
+            if IsEntry(n) & p.hasBackupToken & p.hasOwnerToken & p.numSharerTokens = MaxSharerTokens
+            then
+	      BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, msg.serialId, UNDEFINED);
+              PersistentTableDeactivate(n, n);
+            endif;
           endif;
         endif;
         
@@ -955,7 +984,7 @@ ruleset n: Proc Do
     --==== Lost Token Timeouts ===--
 
     rule "lost token timeout"
-      (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId = p.procId & !h.isRecreating 
+      (!isundefined(p.curPersistentRequester) & !h.isRecreating 
       & !IsNetFull() & tokenTimeoutAmount[n] < MaxTimeoutAmount)
     ==>
       BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n); -- TODO: Note messages that initiate TR cannot be destroyed as 
@@ -963,12 +992,13 @@ ruleset n: Proc Do
       tokenTimeoutAmount[n] := tokenTimeoutAmount[n] + 1;
     endrule;
 
+
     rule "lost persistent deactivation timeout"
       (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId & !IsNetFull()
-       & persistentTimeoutTable[p.curPersistentRequester] < MaxTimeoutAmount)
+        & p.numDeactivateTimeout < MaxTimeoutAmount)
     ==>
       BroadcastFaultMsg(PingPersistent, p.curPersistentRequester, n, UNDEFINED, UNDEFINED, false, UNDEFINED, p.curPersistentRequester);
-      persistentTimeoutTable[p.curPersistentRequester] := persistentTimeoutTable[p.curPersistentRequester] + 1;
+      p.numDeactivateTimeout := p.numDeactivateTimeout + 1;
     endrule;
     
     rule "lost backup deletion acknowledgement" -- TODO: do we need to check for whether token is recreating?
@@ -996,6 +1026,13 @@ rule "token recreation timeout"
   tokenTimeoutAmount[MainMem.tokenRecRequester] := tokenTimeoutAmount[MainMem.tokenRecRequester] + 1;
 endrule;
 
+rule "home lost persistent deactivation timeout"
+  (!isundefined(MainMem.curPersistentRequester) & !IsNetFull()
+    & MainMem.numDeactivateTimeout < MaxTimeoutAmount)
+    ==>
+      MainMem.numDeactivateTimeout := MainMem.numDeactivateTimeout + 1;
+      BroadcastFaultMsg(PingPersistent, MainMem.curPersistentRequester, HomeType, UNDEFINED, UNDEFINED, false, UNDEFINED, MainMem.curPersistentRequester);
+endrule;
 
 -- Message delivery rules per node
 ruleset n: Node do
@@ -1008,22 +1045,28 @@ ruleset n: Node do
     rule "inject-fault"
       (!isundefined(msg.mtype))
       ==>
-        if IsTRMsg(msg) & tokenFaultsInjected[msg.initiator] < MaxFaultsPerTransaction 
-        & tokenTimeoutAmount[msg.initiator] < MaxTimeoutAmount & msg.mtype != StartTokenRec -- TODO: I'm just making it so a start token recreation request can't get lost
+        if ((isundefined(msg.initiator) | (IsTRMsg(msg) & tokenFaultsInjected[msg.initiator] < MaxFaultsPerTransaction 
+        & tokenTimeoutAmount[msg.initiator] < MaxTimeoutAmount & msg.mtype != StartTokenRec)) & msg.mtype != DeactivatePersistent & msg.mtype != PingPersistent)
         then
+        
+	  MultiSetRemove(midx, faultChan);
+          
+	  if !isundefined(msg.initiator)
+	  then
+	    tokenFaultsInjected[msg.initiator] := tokenFaultsInjected[msg.initiator] + 1;
+          endif;
+
+	elsif !IsMember(n, Home) & Procs[n].numDeactivateTimeout < MaxTimeoutAmount then 
           MultiSetRemove(midx, faultChan);
-          tokenFaultsInjected[msg.initiator] := tokenFaultsInjected[msg.initiator] + 1;
-        elsif persistentFaultTable[msg.initiator] < MaxFaultsPerTransaction 
-        & persistentTimeoutTable[msg.initiator] < MaxTimeoutAmount -- Message is not TR message (persistent request)
+	
+	elsif IsMember(n, Home) & MainMem.numDeactivateTimeout < MaxTimeoutAmount then 
           MultiSetRemove(midx, faultChan);
-          persistentFaultTable[msg.initiator] := persistentFaultTable[msg.initiator] + 1;
-        endif; -- TODO: Note, I'm currently opting out of doing any transient requests. Can fix later
+	endif;
     endrule;
 
     rule "process-message"
     (!isundefined(msg.mtype))
       ==>
-     -- PrintAllState();
       if IsMember(n, Home)
       then
         if !(MainMem.isRecreating & msg.mtype = StartTokenRec)
@@ -1050,7 +1093,7 @@ endruleset;
 
 ----------------------------------------------------------------------
 -- Startstate
-----------------------------------------------------------------------
+
 startstate
     -- TBD: Update this
     For v: Value do
@@ -1064,14 +1107,16 @@ startstate
         MainMem.TrSAckCount := 0;
         MainMem.OwnerAck := false;
         MainMem.BInvAckCount := 0;
-
     endfor;
     LastWrite := MainMem.val;
+    MainMem.numDeactivateTimeout := 0;
     
     -- processor initialization
     procId := 0;
     for i: Proc do
-
+        tokenTimeoutAmount[i] := 0;
+        tokenFaultsInjected[i] := 0;
+	MainMem.persistentTable[i] := false;
         Procs[i].procId := procId;
         Procs[i].hasOwnerToken := false;
         Procs[i].hasBackupToken := false;
@@ -1079,12 +1124,15 @@ startstate
         Procs[i].desiredState := INVALID;
         Procs[i].curSerial := 0;
         Procs[i].numPerfMsgs := 0;
-
+        Procs[i].numDeactivateTimeout := 0;
         procId := procId + 1;
         undefine Procs[i].val;
+        
+        for j: Proc do
+	  Procs[i].persistentTable[j] := false;
+        endfor;
 
-    endfor;
-
+    endfor; 
     -- network initialization
     
 endstartstate;
