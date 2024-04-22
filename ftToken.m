@@ -12,6 +12,9 @@ const
   MaxPerfMsgs: 0; -- Number of repeated perf reqs sent before persistent req
   MaxTokenSerialNum: 1;
   MaxSharerTokens: (ProcCount-1);
+  MaxFaultsPerTransaction: 3;
+  MaxTimeoutAmount: 3;
+  MaxTransactionNum: 10;
   
 ----------------------------------------------------------------------
 -- Types
@@ -28,6 +31,8 @@ type
     SerialNumType: 0..MaxTokenSerialNum;
     ProcIdType: 0..(ProcCount);
     AckCount: 0..(ProcCount);
+    FaultCount: 0..MaxFaultsPerTransaction;
+    TimeoutCount: 0..MaxTimeoutAmount;
 
     MessageType: enum {
         -- Regular transient requests
@@ -63,6 +68,9 @@ type
             numSharerTokens: SharerTokenCount;
             hasOwnerToken: boolean;
             serialId: SerialNumType;
+            initiator: Node; -- TODO: Confirm that a Proc is always the initiator
+            -- faultsInjected: FaultCount;
+            -- timeoutAmount: TimeoutCount;
             -- nextSerialId: SerialNumType;
         End;
 
@@ -80,6 +88,10 @@ type
             BInvAckCount: AckCount;
             OwnerAck: boolean;
             tokenRecRequester: Node;
+            -- tokenFaultsInjected: array [Proc] of FaultCount;
+            -- tokenTimeoutAmount: array [Proc] of TimeoutCount;
+            -- persistentFaultTable: array [proc] of FaultCount;
+            -- persistentTimeoutTable: array [proc] of TimeoutCount;
         End;
 
     ProcState:
@@ -92,6 +104,10 @@ type
             curSerial: SerialNumType;
             curPersistentRequester: Proc;
             persistentTable: array [Proc] of boolean;
+            -- tokenFaultsInjected: array [Proc] of FaultCount;
+            -- tokenTimeoutAmount: array [Proc] of TimeoutCount;
+            -- persistentFaultTable: array [proc] of FaultCount;
+            -- persistentTimeoutTable: array [proc] of TimeoutCount;
 
             -- The following fields are used for rulesets:
             desiredState : enum {
@@ -100,7 +116,6 @@ type
               MODIFIED
             };
             numPerfMsgs: PerfMsgCount;
-
         End;
 
 ----------------------------------------------------------------------
@@ -113,25 +128,30 @@ var
     FaultNet: array [Node] of multiset [NetMax] of Message;  -- Performance and persistent messages, can be deleted
     --TrNet: array [Node] of Message;                          -- TODO: Modify/Delete TrNet as it is no longer cosmic ray proof
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
+    tokenFaultsInjected: array [Proc] of FaultCount;
+    tokenTimeoutAmount: array [Proc] of TimeoutCount;
+    persistentFaultTable: array [proc] of FaultCount;
+    persistentTimeoutTable: array [proc] of TimeoutCount;
 
 ----------------------------------------------------------------------
 -- Procedures
 ----------------------------------------------------------------------
 
--- Checks whether message is a transient request
-Function IsTRMsg(msg:Message) : boolean;         -- TODO: Delete this once TRNet is fixed
+-- Checks whether message is part of token recreation process
+Function IsTRMsg(msg:Message) : boolean;
 Begin
-  return (msg.mtype = SetSerialNum |
+  return (msg.mtype = StartTokenRec | 
+          msg.mtype = SetSerialNum | 
+          msg.mtype = SetSerialNumAck | 
           msg.mtype = BackupInv | 
-          msg.mtype = DestructionDone | 
-          msg.mtype = StartTokenRec |
-          msg.mtype = SetSerialNumAck);
+          msg.mtype = BackupInvAck | 
+          msg.mtype = DestructionDone);
 End;
 
 Function IsNetFull() : boolean;
 Begin
   for n : Node do
-    if (MultiSetCount(i: FaultNet[n], true) >= 4 - 1)
+    if (MultiSetCount(i: FaultNet[n], true) >= 2 - 1)
     then
       return true;
     endif;
@@ -148,6 +168,7 @@ Procedure BroadcastFaultMsg (
     numSharerTokens: SharerTokenCount;
     hasOwnerToken: boolean;
     serialId: SerialNumType;
+    initiator: Node;
     -- nextSerialId: SerialNumType; TODO: You might need this if you're having problems with 1 million cycle old TrS messages
 );
 var msg: Message;
@@ -232,7 +253,7 @@ Begin
         assert(!isundefined(msg.val));
         assert(isundefined(p.hasOwnerToken) | p.hasOwnerToken = false);
         p.hasOwnerToken := true;
-        BroadcastFaultMsg(AckO, UNDEFINED, n, UNDEFINED, UNDEFINED, false, p.curSerial);
+        BroadcastFaultMsg(AckO, UNDEFINED, n, UNDEFINED, UNDEFINED, false, p.curSerial, UNDEFINED);
       endif;
 
       -- resetting perfMsgCount as request is satisfied
@@ -292,16 +313,16 @@ Begin
 
   if p.hasOwnerToken & p.hasBackupToken -- State M/O
   then
-    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, true, p.curSerial);
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, true, p.curSerial, dst);  -- TODO: Confirm dst is fine for 'initiator'
     p.numSharerTokens := 0;
     p.hasOwnerToken := false;
   elsif p.hasOwnerToken & p.numSharerTokens > 0 -- State Mb/Ob
   then
-    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial);
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial, dst);
     p.numSharerTokens := 0;
   elsif p.numSharerTokens > 0 -- State S
   then
-    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial);
+    BroadcastFaultMsg(Tokens, dst, src, p.val, p.numSharerTokens, false, p.curSerial, dst);
     p.numSharerTokens := 0;
     undefine p.val;
   endif;
@@ -380,7 +401,7 @@ Begin
     -- assumption that serial number will be large enough that serial numbers won't wrap around—should have triggered persistent/regen request
     -- NukeEverything();
     NukeAliasSerialTag(h.curSerial);
-    BroadcastFaultMsg(SetSerialNum, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
+    BroadcastFaultMsg(SetSerialNum, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, h.tokenRecRequester);
   endalias;
 End;
 
@@ -399,7 +420,6 @@ Begin
   endfor;
   return false;
 End;
-
 
 Function HasMultipleBackups() : Boolean;
 Begin 
@@ -458,16 +478,16 @@ Begin
         then
           if h.hasOwnerToken & h.hasBackupToken & (h.numSharerTokens = MaxSharerTokens) -- State M
           then
-            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, true, h.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, true, h.curSerial, msg.initiator);
             h.hasOwnerToken := false;
             h.numSharerTokens := 0;
           elsif h.hasOwnerToken & (h.numSharerTokens > 0) -- State O/Ob/Mb with more than 1 sharer
           then
-              BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, 1, false, h.curSerial);
+              BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, 1, false, h.curSerial, msg.initiator);
               h.numSharerTokens := h.numSharerTokens - 1;
           elsif h.hasOwnerToken & h.hasBackupToken -- State O; no sharers
           then
-            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, 0, true, h.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, 0, true, h.curSerial, msg.initiator);
             h.hasOwnerToken := false;
           endif;
         endif;
@@ -477,7 +497,7 @@ Begin
         then
           if h.hasOwnerToken & h.hasBackupToken -- State M/O
           then
-            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, true, h.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, true, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
             h.hasOwnerToken := false;
           elsif h.hasOwnerToken & h.numSharerTokens > 0 -- State Mb/Ob with 1 or more sharer tokens
@@ -485,11 +505,11 @@ Begin
             -- NOTE: See commit history. I changed messages that only send sharer tokens when the request wants all tokens to also send data.
             -- (contd.) I did this (wouldn't be necessary in a real system) because we aren't keeping track of previous requests and invariants will fail if sharer
             -- (contd.) tokens do not represent valid data always
-            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, false, h.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, false, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
           elsif h.numSharerTokens > 0 -- State S
           then
-            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, false, h.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, HomeType, h.val, h.numSharerTokens, false, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
             undefine h.val;
           endif;
@@ -497,7 +517,7 @@ Begin
 
       case StartTokenRec:
         h.tokenRecRequester := msg.src;
-	RecreateTokens();
+	      RecreateTokens();
       
       case SetSerialNumAck:
         if msg.serialId = h.curSerial
@@ -526,18 +546,18 @@ Begin
                   h.isRecreating := false;
                 else  -- Initiator of token recreation was a processor
                   Assert(!isundefined(h.tokenRecRequester));
-		  BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, h.val, MaxSharerTokens, true, h.curSerial);
+		              BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, h.val, MaxSharerTokens, true, h.curSerial, msg.initiator);
                   h.numSharerTokens := 0;
                   h.hasOwnerToken := false;
                   undefine h.tokenRecRequester;
                   h.isRecreating := false;
                 endif;
               else -- Memory has owner but not backup (Memory was in state Mb/Ob before the TR process)
-                BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
+                BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);
               endif;
             elsif h.OwnerAck  -- Memory did not have the ownership token before the TR process
             then
-              BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);  -- TODO: Can memory see this request and does it matter?
+              BroadcastFaultMsg(BackupInv, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);  -- TODO: Can memory see this request and does it matter?
             else  -- Memory did not receive data from any processor (even after full TR process)
               if h.tokenRecRequester = HomeType -- Memory had the only true backup copy
               then
@@ -548,7 +568,7 @@ Begin
                 h.isRecreating := false;
               else -- Some other processor has the true backup copy of the data
                 Assert(!isundefined(h.tokenRecRequester));
-		BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, UNDEFINED, 0, false, h.curSerial);
+		            BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, UNDEFINED, 0, false, h.curSerial, msg.initiator);
               endif;
             endif;
           endif;
@@ -563,8 +583,8 @@ Begin
           h.BInvAckCount := h.BInvAckCount + 1;
           if h.BInvAckCount = ProcCount then
             h.hasBackupToken := true; 
-            BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, h.val, MaxSharerTokens, true, h.curSerial);
-	    Assert(!isundefined(h.tokenRecRequester));
+            BroadcastFaultMsg(DestructionDone, h.tokenRecRequester, HomeType, h.val, MaxSharerTokens, true, h.curSerial, msg.initiator);
+	          Assert(!isundefined(h.tokenRecRequester));
             h.numSharerTokens := 0;
             h.hasOwnerToken := false;
             h.OwnerAck := false;  -- TODO: Add invariant that h.OwnerAck, if h.isRecreating is false, must be false
@@ -589,16 +609,16 @@ Begin
         then
           if h.hasOwnerToken & h.hasBackupToken -- State M/O
           then
-            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, true, h.curSerial);
+            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, true, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
             h.hasOwnerToken := false;
           elsif h.hasOwnerToken -- State Mb/Ob
           then
-            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, false, h.curSerial);
+            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, false, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
           elsif h.numSharerTokens > 0 -- State S
           then
-            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, false, h.curSerial);
+            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, h.val, h.numSharerTokens, false, h.curSerial, msg.initiator);
             h.numSharerTokens := 0;
             undefine h.val;
           endif;
@@ -629,7 +649,7 @@ Begin
             -- assert(h.hasBackupToken & !h.hasOwnerToken) -- Memory must be in Backup state to get sent this message
               -- "Memory is not in a backup state but it got sent an AckO with the right serial number";
             
-	    BroadcastFaultMsg(AckBD, msg.src, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
+	          BroadcastFaultMsg(AckBD, msg.src, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);
             h.hasBackupToken := false;
             undefine h.val;
           endif;
@@ -654,7 +674,7 @@ Begin
           if !IsUndefined(h.curPersistentRequester)
           then
             -- Forward received tokens to persistent requester (that's not self)
-            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId);
+            BroadcastFaultMsg(Tokens, h.curPersistentRequester, HomeType, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId, msg.initiator);
           else
             h.numSharerTokens := h.numSharerTokens + msg.numSharerTokens;
             if !IsUndefined(msg.val)
@@ -669,7 +689,7 @@ Begin
               assert(IsUndefined(h.hasOwnerToken))
                 "Got sent owner token while currently having the owner token";
               h.hasOwnerToken := true;
-              BroadcastFaultMsg(AckO, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial);
+              BroadcastFaultMsg(AckO, UNDEFINED, HomeType, UNDEFINED, UNDEFINED, false, h.curSerial, msg.initiator);
             endif;
             -- resetting perfMsgCount as request is satisfied
             -- h.numPerfMsgs := 0;  TODO: I don't know wtf this is doing
@@ -702,16 +722,16 @@ Begin
       -- (contd.) and the proc in O sends the data + 1 token on read request. Migratory sharing optimization is present
         if p.hasOwnerToken & p.hasBackupToken & (p.numSharerTokens = MaxSharerTokens) -- State M
         then
-          BroadcastFaultMsg(Tokens, msg.src, n, p.val, p.numSharerTokens, true, p.curSerial);
+          BroadcastFaultMsg(Tokens, msg.src, n, p.val, p.numSharerTokens, true, p.curSerial, msg.initiator);
           p.hasOwnerToken := false;
           p.numSharerTokens := 0;
         elsif p.hasOwnerToken & (p.numSharerTokens > 0) -- State O/Ob/Mb with more than 1 sharer
         then
-            BroadcastFaultMsg(Tokens, msg.src, n, p.val, 1, false, p.curSerial);
+            BroadcastFaultMsg(Tokens, msg.src, n, p.val, 1, false, p.curSerial, msg.initiator);
             p.numSharerTokens := p.numSharerTokens - 1;
         elsif p.hasOwnerToken & p.hasBackupToken -- State O; no sharers
         then
-          BroadcastFaultMsg(Tokens, msg.src, n, p.val, 0, true, p.curSerial); -- TODO: confirm whether want to send owner token for getS?
+          BroadcastFaultMsg(Tokens, msg.src, n, p.val, 0, true, p.curSerial, msg.initiator); -- TODO: confirm whether want to send owner token for getS?
           p.hasOwnerToken := false;
         endif;
 
@@ -724,20 +744,20 @@ Begin
         then
           if p.hasBackupToken -- State M/O
           then
-            BroadcastFaultMsg(SetSerialNumAck, HomeType, n, p.val, UNDEFINED, true, p.curSerial);
+            BroadcastFaultMsg(SetSerialNumAck, HomeType, n, p.val, UNDEFINED, true, p.curSerial, msg.initiator);
             p.numSharerTokens := 0;
             p.hasOwnerToken := false; -- Proc will go to state B
           else -- State Mb/Ob
-            BroadcastFaultMsg(SetSerialNumAck, HomeType, n, p.val, UNDEFINED, false, p.curSerial); -- Cannot send Owner token
+            BroadcastFaultMsg(SetSerialNumAck, HomeType, n, p.val, UNDEFINED, false, p.curSerial, msg.initiator); -- Cannot send Owner token
             p.numSharerTokens := 0; -- Proc will go to state Ob
           endif;
         else -- State S/B/I
-          BroadcastFaultMsg(SetSerialNumAck, HomeType, n, UNDEFINED, UNDEFINED, false, p.curSerial);
+          BroadcastFaultMsg(SetSerialNumAck, HomeType, n, UNDEFINED, UNDEFINED, false, p.curSerial, msg.initiator);
           p.numSharerTokens := 0;
-	  if !p.hasBackupToken
-	  then
-	    undefine p.val;
-	  endif;
+          if !p.hasBackupToken
+          then
+            undefine p.val;
+          endif;
         endif;
 
       case BackupInv:
@@ -747,11 +767,13 @@ Begin
             "Processor has sharer tokens when every valid token was deleted from system";
           p.hasOwnerToken := false; -- Now if in state Mb/Ob you can get rid of data as memory is guaranteed to have most recent data
           p.hasBackupToken := false;
-	  undefine p.val;
+	        undefine p.val;
         endif;
 
       case DestructionDone:
         if msg.serialId = p.curSerial then
+          tokenFaultsInjected[msg.initiator] := 0;
+          tokenTimeoutAmount[msg.initiator] := 0;
           assert(!(p.numSharerTokens > 0 | p.hasOwnerToken))
             "Processor received TrDone while it has non-backup tokens";
           if !IsUndefined(msg.val) -- Destruction done w/ data
@@ -765,8 +787,8 @@ Begin
             then
               SendAllTokens(p.curPersistentRequester, n); -- TODO: Confirm that this sends every token except the owner token
             else
-	      BroadcastFaultMsg(AckO, UNDEFINED, n, UNDEFINED, UNDEFINED, false, p.curSerial);
-	    endif;
+	            BroadcastFaultMsg(AckO, UNDEFINED, n, UNDEFINED, UNDEFINED, false, p.curSerial, UNDEFINED);
+            endif;
           else  -- Destruction done w/o data
             if p.hasBackupToken
             then
@@ -774,7 +796,7 @@ Begin
               p.hasOwnerToken := true;
               if !isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId
               then
-                SendAllTokens(p.curPersistentRequester, n); -- TODO: Confirm that this sends every token except the owner token
+                SendAllTokens(p.curPersistentRequester, n);
               endif;
             endif;
           endif;
@@ -793,20 +815,20 @@ Begin
 
       case PingPersistent: -- 
         if !IsEntry(n) then -- not already in persistent table
-         BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED); -- TODO: I currently have msg.dst as UNDEFINED as this message is meant for every processor. Is this fine?
+         BroadcastFaultMsg(DeactivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
         endif;
 
       case AckO: -- ownership has been transfered, data safe to destroy
         if msg.serialId = p.curSerial
         then
-	  if p.hasBackupToken & !p.hasOwnerToken
-	  then
+          if p.hasBackupToken & !p.hasOwnerToken
+          then
           -- assert(p.hasBackupToken & !p.hasOwnerToken) -- Processor must be in Backup state to get sent this message
              -- "Processor is not in a backup state but it got sent an AckO with the right serial number";
-          BroadcastFaultMsg(AckBD, msg.src, n, UNDEFINED, UNDEFINED, false, p.curSerial);
+          BroadcastFaultMsg(AckBD, msg.src, n, UNDEFINED, UNDEFINED, false, p.curSerial, UNDEFINED);
           p.hasBackupToken := false;
           undefine p.val;
-	  endif;
+	        endif;
         endif;
 
       case AckBD: -- previous backup has been destroyed
@@ -823,7 +845,7 @@ Begin
           if !isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId
           then
             -- Forward received tokens to persistent requester (that's not self)
-            BroadcastFaultMsg(Tokens, p.curPersistentRequester, n, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId);
+            BroadcastFaultMsg(Tokens, p.curPersistentRequester, n, msg.val, msg.numSharerTokens, msg.hasOwnerToken, msg.serialId, p.curPersistentRequester);
           else
             ReceiveTokens(n, msg);
           endif;
@@ -899,7 +921,7 @@ ruleset n: Proc Do
     rule "send GetS"
       (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
-      BroadcastFaultMsg(GetS, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(GetS, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
       p.numPerfMsgs := p.numPerfMsgs + 1;
   
     endrule;
@@ -907,7 +929,7 @@ ruleset n: Proc Do
     rule "send GetM"
       (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs < MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
-      BroadcastFaultMsg(GetM, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(GetM, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
       p.numPerfMsgs := p.numPerfMsgs + 1;
 
     endrule;
@@ -917,7 +939,7 @@ ruleset n: Proc Do
       (!IsShared(n) & p.desiredState = SHARED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       PersistentTableActivate(n, n);
-      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
       assert(IsEntry(n));
     endrule;
 
@@ -925,7 +947,7 @@ ruleset n: Proc Do
       (!IsModified(n) & p.desiredState = MODIFIED & p.numPerfMsgs = MaxPerfMsgs & !IsEntry(n) & !IsNetFull())
     ==>
       PersistentTableActivate(n, n);
-      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(ActivatePersistent, UNDEFINED, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
       assert(IsEntry(n));
     endrule;
 
@@ -933,27 +955,34 @@ ruleset n: Proc Do
     --==== Lost Token Timeouts ===--
 
     rule "lost token timeout"
-      (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId = p.procId & !h.isRecreating & !IsNetFull())
+      (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId = p.procId & !h.isRecreating 
+      & !IsNetFull() & tokenTimeoutAmount[n] < MaxTimeoutAmount)
     ==>
-      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n); -- TODO: Note messages that initiate TR cannot be destroyed as 
+                                                                                                -- destroying it has no effect on coherence and just clutters our states
+      tokenTimeoutAmount[n] := tokenTimeoutAmount[n] + 1;
     endrule;
 
     rule "lost persistent deactivation timeout"
-      (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId & !IsNetFull())
+      (!isundefined(p.curPersistentRequester) & Procs[p.curPersistentRequester].procId != p.procId & !IsNetFull()
+       & persistentTimeoutTable[p.curPersistentRequester] < MaxTimeoutAmount)
     ==>
-      BroadcastFaultMsg(PingPersistent, p.curPersistentRequester, n, UNDEFINED, UNDEFINED, false, UNDEFINED); 
+      BroadcastFaultMsg(PingPersistent, p.curPersistentRequester, n, UNDEFINED, UNDEFINED, false, UNDEFINED, p.curPersistentRequester);
+      persistentTimeoutTable[p.curPersistentRequester] := persistentTimeoutTable[p.curPersistentRequester] + 1;
     endrule;
     
     rule "lost backup deletion acknowledgement" -- TODO: do we need to check for whether token is recreating?
-      (IsModified(n) & p.hasOwnerToken & !p.hasBackupToken & !h.isRecreating  & !IsNetFull())
+      (IsModified(n) & p.hasOwnerToken & !p.hasBackupToken & !h.isRecreating  & !IsNetFull() & tokenTimeoutAmount[n] < MaxTimeoutAmount)
     ==> 
-      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
+      tokenTimeoutAmount[n] := tokenTimeoutAmount[n] + 1;
     endrule;
 
     rule "lost ownership acknowledgement" 
-      (!IsModified(n) & p.hasBackupToken & !h.isRecreating  & !IsNetFull())
+      (!IsModified(n) & p.hasBackupToken & !h.isRecreating  & !IsNetFull() & tokenTimeoutAmount[n] < MaxTimeoutAmount)
     ==> 
-      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED);
+      BroadcastFaultMsg(StartTokenRec, HomeType, n, UNDEFINED, UNDEFINED, false, UNDEFINED, n);
+      tokenTimeoutAmount[n] := tokenTimeoutAmount[n] + 1;
     endrule;
 
     endalias; -- h
@@ -961,16 +990,15 @@ ruleset n: Proc Do
 endruleset;
 
 rule "token recreation timeout"
-  (MainMem.isRecreating & !IsNetFull())
+  (MainMem.isRecreating & !IsNetFull() & tokenTimeoutAmount[MainMem.tokenRecRequester] < MaxTimeoutAmount)
 ==>
   RecreateTokens();
+  tokenTimeoutAmount[MainMem.tokenRecRequester] := tokenTimeoutAmount[MainMem.tokenRecRequester] + 1;
 endrule;
 
 
 -- Message delivery rules per node
 ruleset n: Node do
-
-
 
   -- Rule to delete or process message
   choose midx : FaultNet[n] do
@@ -980,9 +1008,16 @@ ruleset n: Node do
     rule "inject-fault"
       (!isundefined(msg.mtype))
       ==>
-      -- TODO: do we need a bit to ensure forward progress?
-      -- I dont think so since Murphi will collapse circular states
-      MultiSetRemove(midx, faultChan);
+        if IsTRMsg(msg) & tokenFaultsInjected[msg.initiator] < MaxFaultsPerTransaction 
+        & tokenTimeoutAmount[msg.initiator] < MaxTimeoutAmount & msg.mtype != StartTokenRec -- TODO: I'm just making it so a start token recreation request can't get lost
+        then
+          MultiSetRemove(midx, faultChan);
+          tokenFaultsInjected[msg.initiator] := tokenFaultsInjected[msg.initiator] + 1;
+        elsif persistentFaultTable[msg.initiator] < MaxFaultsPerTransaction 
+        & persistentTimeoutTable[msg.initiator] < MaxTimeoutAmount -- Message is not TR message (persistent request)
+          MultiSetRemove(midx, faultChan);
+          persistentFaultTable[msg.initiator] := persistentFaultTable[msg.initiator] + 1;
+        endif; -- TODO: Note, I'm currently opting out of doing any transient requests. Can fix later
     endrule;
 
     rule "process-message"
@@ -1029,6 +1064,7 @@ startstate
         MainMem.TrSAckCount := 0;
         MainMem.OwnerAck := false;
         MainMem.BInvAckCount := 0;
+
     endfor;
     LastWrite := MainMem.val;
     
