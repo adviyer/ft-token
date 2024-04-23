@@ -1064,7 +1064,7 @@ startstate
       MainMem.TrSAckCount := 1;
       MainMem.BInvAckCount := 0;
       MainMem.OwnerAck := false;
-
+      MainMem.val := UNDEFINED;
     else
       Procs[n].procId := procId;
 
@@ -1077,7 +1077,6 @@ startstate
         Procs[n].curSerial := 0;
         Procs[n].numPerfMsgs := 0;
         AddMsg(SetSerialNum, n, HomeType, UNDEFINED, 0, false, 1);
-        Procs[n].val = Value_1;
       else
         Procs[n].hasOwnerToken := false;
         Procs[n].hasBackupToken := true;
@@ -1144,10 +1143,7 @@ startstate
 
       endif;
       
-
     endfor;
-
-
 
   endfor;
   
