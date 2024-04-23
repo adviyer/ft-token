@@ -1052,7 +1052,7 @@ startstate
   for n: Node do
     
 
-    if IsMember(n, HomeType)
+    if IsMember(n, Home)
     then
 
       MainMem.val := UNDEFINED;
@@ -1060,9 +1060,6 @@ startstate
       MainMem.hasOwnerToken := false;
       MainMem.hasBackupToken := false;
       MainMem.curSerial := 1;
-      MainMem.curPersistentRequester := 0;
-      MainMem.persistentTable[0] := true;
-      MainMem.persistentTable[1] := false;
       MainMem.isRecreating := true;
       MainMem.TrSAckCount := 1;
       MainMem.BInvAckCount := 0;
@@ -1079,9 +1076,6 @@ startstate
         Procs[n].desiredState := MODIFIED;
         Procs[n].curSerial := 0;
         Procs[n].numPerfMsgs := 0;
-        Procs[n].val := 1;
-        Procs[n].persistentTable[0] := true;
-        Procs[n].persistentTable[1] := false;
         AddMsg(SetSerialNum, n, HomeType, UNDEFINED, 0, false, 1);
       else
         Procs[n].hasOwnerToken := false;
@@ -1090,9 +1084,6 @@ startstate
         Procs[n].desiredState := INVALID;
         Procs[n].curSerial := 1;
         Procs[n].numPerfMsgs := 0;
-        Procs[n].val := 0;
-        Procs[n].persistentTable[0] := true;
-        Procs[n].persistentTable[1] := false;
       endif;
   
       procId := procId + 1;
@@ -1104,15 +1095,14 @@ startstate
 
   for n : Node do
 
-    if !IsMember(n, HomeType) & Procs[n].procId = 0
-
+    if !IsMember(n, Home) & Procs[n].procId = 0 then
       for i : Node do
-        if IsMember(i, HomeType)
+        if IsMember(i, Home)
         then
-          MainMem.curPersistentRequester = Procs[n];
-          MainMem.tokenRecRequester = Procs[n];
+          MainMem.curPersistentRequester := n;
+          MainMem.tokenRecRequester := n;
         else
-          Procs[i].curPersistentRequester = Procs[n];
+          Procs[i].curPersistentRequester := n;
         endif;
 
       endfor;
