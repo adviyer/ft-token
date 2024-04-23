@@ -1124,25 +1124,24 @@ startstate
 
   endfor;
 
+  for v : Value do
+
+    LastWrite := v;
+
+  endfor;
+
 
   for v : Value do
 
     for n : Node do
 
-      if !IsMember(n, Home) & Procs[n].procId = 0 
+      if !IsMember(n, Home) & Procs[n].procId = 0 & v != LastWrite
       then
         Procs[n].val := v;
-      else
-
-        if IsMember(n, Home)
-        then 
-          MainMem.val := v;
-        else
-          Procs[n].val := v;
-        endif;
-
+      elsif !IsMember(n, Home) & Procs[n].procId = 1 & v = LastWrite
+        Procs[n].val := v;
       endif;
-      
+
     endfor;
 
   endfor;
