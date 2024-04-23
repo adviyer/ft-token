@@ -1077,6 +1077,7 @@ startstate
         Procs[n].curSerial := 0;
         Procs[n].numPerfMsgs := 0;
         AddMsg(SetSerialNum, n, HomeType, UNDEFINED, 0, false, 1);
+        Procs[n].val = Value_1;
       else
         Procs[n].hasOwnerToken := false;
         Procs[n].hasBackupToken := true;
@@ -1096,18 +1097,57 @@ startstate
   for n : Node do
 
     if !IsMember(n, Home) & Procs[n].procId = 0 then
+
       for i : Node do
         if IsMember(i, Home)
         then
           MainMem.curPersistentRequester := n;
           MainMem.tokenRecRequester := n;
+          MainMem.persistentTable[n] := true;
         else
           Procs[i].curPersistentRequester := n;
+          Procs[i].persistentTable[n] := true;
         endif;
+      endfor;
 
+    elsif !IsMember(n, Home) & Procs[n].procId = 1 then
+
+      for i : Node do
+        if IsMember(i, Home)
+        then
+          MainMem.persistentTable[n] := false;
+        else
+          Procs[i].persistentTable[n] := false;
+        endif;
       endfor;
 
     endif;
+
+  endfor;
+
+
+  for v : Value do
+
+    for n : Node do
+
+      if !IsMember(n, Home) & Procs[n].procId = 0 
+      then
+        Procs[n].val := v;
+      else
+
+        if IsMember(n, Home)
+        then 
+          MainMem.val := v;
+        else
+          Procs[n].val := v;
+        endif;
+
+      endif;
+      
+
+    endfor;
+
+
 
   endfor;
   
