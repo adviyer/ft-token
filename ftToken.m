@@ -165,11 +165,17 @@ Begin
     msg.serialId        := serialId;
 
     -- Iterate through each node's multiset in faultnet and add the message
-    
-    for n : Node do
-      assert(MultiSetCount(i: FaultNet[n], true) < NetMax) "Too many messages";
-      MultiSetAdd(msg, FaultNet[n]);
-    end;
+    if isundefined(msg.dst)
+    then    
+    	for n : Node do
+      	  assert(MultiSetCount(i: FaultNet[n], true) < NetMax) "Too many messages";
+      	  MultiSetAdd(msg, FaultNet[n]);
+    	end;
+    else
+     assert(MultiSetCount(i: FaultNet[msg.dst], true) < NetMax) "Too many messages";
+     MultiSetAdd(msg, FaultNet[msg.dst]);
+    endif;
+
 End;
 
 
@@ -867,6 +873,27 @@ End;
 -- Rules
 ----------------------------------------------------------------------
 
+ruleset n: Proc Do
+    alias p : Procs[n] do
+    
+    ruleset v: Value do
+
+      rule "store while modified"
+	(IsModified(n))
+      ==>
+	p.val := v;
+	LastWrite := v;
+      endrule;
+
+    endruleset;
+
+    endalias;
+endruleset;
+
+
+
+
+/*
 -- Processor actions (affecting coherency)
 ruleset n: Proc Do
     alias p: Procs[n] do
@@ -989,6 +1016,8 @@ ruleset n: Proc Do
     endalias; -- p
 endruleset;
 
+*/
+
 rule "token recreation timeout"
   (MainMem.isRecreating & !IsNetFull())
 ==>
@@ -1072,7 +1101,7 @@ startstate
       then
         Procs[n].hasOwnerToken := true;
         Procs[n].hasBackupToken := false;
-        Procs[n].numSharerTokens := 1;
+        Procs[n].numSharerTokens := 0;
         Procs[n].desiredState := MODIFIED;
         Procs[n].curSerial := 0;
         Procs[n].numPerfMsgs := 0;
@@ -1135,10 +1164,11 @@ startstate
 
     for n : Node do
 
-      if !IsMember(n, Home) & Procs[n].procId = 0 & v != LastWrite
+      if !IsMember(n, Home) & Procs[n].procId = 0 & v = LastWrite
       then
         Procs[n].val := v;
-      elsif !IsMember(n, Home) & Procs[n].procId = 1 & v = LastWrite
+      elsif !IsMember(n, Home) & Procs[n].procId = 1 & v != LastWrite
+      then
         Procs[n].val := v;
       endif;
 
