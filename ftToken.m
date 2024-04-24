@@ -129,7 +129,7 @@ var
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
     tokenFaultsInjected: array [Proc] of FaultCount;
     tokenTimeoutAmount: array [Proc] of TimeoutCount;
-    var cnt:0..ProcCount;
+    var cnt:0..ProcCount+2;
 
 ----------------------------------------------------------------------
 -- Procedures
@@ -255,6 +255,10 @@ Begin
       then
         assert(!isundefined(msg.val));
         assert(isundefined(p.hasOwnerToken) | p.hasOwnerToken = false);
+        if msg.src != HomeType
+        then
+        assert(Procs[msg.src].hasBackupToken = true) "Owner token sender should have backup token";
+        endif;
         p.hasOwnerToken := true;
         BroadcastFaultMsg(AckO, UNDEFINED, n, UNDEFINED, UNDEFINED, false, p.curSerial, UNDEFINED);
       endif;
