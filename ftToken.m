@@ -129,6 +129,7 @@ var
     LastWrite: Value; -- Used to confirm that writes are not lost; this variable would not exist in real hardware
     tokenFaultsInjected: array [Proc] of FaultCount;
     tokenTimeoutAmount: array [Proc] of TimeoutCount;
+    var cnt:0..ProcCount;
 
 ----------------------------------------------------------------------
 -- Procedures
@@ -438,6 +439,27 @@ Begin
     endif;
   endfor;
   return false;
+End;
+
+Function TokensConserved() : Boolean;
+Begin 
+  cnt := 0;
+  For n : Proc Do  
+    cnt := cnt + Procs[n].numSharerTokens;
+    if (Procs[n].hasOwnerToken) 
+    then 
+      cnt := cnt + 1;
+    elsif (Procs[n].hasBackupToken)
+    then
+      cnt := cnt + 1;
+    endif;
+  End;
+  if cnt > ProcCount + 1
+  then
+    return false;
+  else 
+    return true;
+  endif;
 End;
 
 Procedure PrintProcState(n:Proc);
@@ -1163,6 +1185,9 @@ invariant "Maximum of one owned token"
 
 invariant "Maximum of one backup token"
     HasMultipleBackups() = false;
+
+invariant "Conservation of Tokens"
+    TokensConserved() = true;
 
 /* Is wrong
 invariant "Backup state implies no tokens except backup"
